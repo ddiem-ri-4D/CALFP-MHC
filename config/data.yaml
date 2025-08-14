@@ -1,0 +1,6 @@
+mhc_seq: data/pseudosequence.2016.all.X.dat
+train: data/data2.txt
+pretrain: data/data_pretrain2.txt
+cv_id: data/cv_id2.txt
+binding: data/binding.txt
+results: results
