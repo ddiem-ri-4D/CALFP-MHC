@@ -21,12 +21,15 @@ This repository contains code and data for training and evaluating **CALFP-MHC**
 # Clone repository
 git clone https://github.com/ddiem-ri-4D/CALFP-MHC
 cd CALFP-MHC/
+```
 
-# Create and activate conda environment
+## Create and activate conda environment
+```bash
 conda env create -f environment.yml
 conda activate CALFP
+```
 
-## Data Format
+## Data format
 
 The model requires **Parquet** format (`.parquet`) with at least the following columns:
 
