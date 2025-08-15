@@ -41,10 +41,10 @@ The model requires **Parquet** format (`.parquet`) with at least the following c
 | SARDRVRTDTQY  | FVSKLYYFE | 0     |
 | SARDRVRTDTQY  | KLSHQPVLL | 0     |
 
-Columns:
-- Peptide: amino acid sequence of the peptide  
-- MHC: amino acid sequence of the MHC allele  
-- Label: binding indicator (`1` = binding, `0` = non-binding) — only required for training  
+**Columns**:
+- **Peptide**: amino acid sequence of the peptide  
+- **MHC**: amino acid sequence of the MHC allele  
+- **Label**: binding indicator (`1` = binding, `0` = non-binding) — only required for training  
 
 Example files:
 - `train.parquet` — training set  
