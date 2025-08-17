@@ -55,20 +55,20 @@ Example files:
 
 ### 1. Train and evaluate on an independent test set
 ```bash
-python -u conbotnet_pretrain.py -d config/data.yaml --mode train
-python -u conbotnet_fine_tuning.py -d config/data.yaml --mode train
+python -u calfp_pretrain.py -d config/data.yaml --mode train
+python -u calfp_fine_tuning.py -d config/data.yaml --mode train
 ```
 
 ### 2. 5-fold cross-validation
 ```bash 
-python -u conbotnet_pretrain.py -d config/data.yaml --mode 5cv
-python -u conbotnet_fine_tuning.py -d config/data.yaml --mode 5cv
+python -u calfp_pretrain.py -d config/data.yaml --mode 5cv
+python -u calfp_fine_tuning.py -d config/data.yaml --mode 5cv
 ```
 
 ### 3. Leave-One-Molecule-Out cross-validation
 ```bash
-python -u conbotnet_pretrain.py -d config/data.yaml --mode lomo
-python -u conbotnet_fine_tuning.py -d config/data.yaml --mode lomo
+python -u calfp_pretrain.py -d config/data.yaml --mode lomo
+python -u calfp_fine_tuning.py -d config/data.yaml --mode lomo
 ```
 
 ## Citation
