@@ -1,4 +1,4 @@
-#CALFP.py
+# CALFP.py
 
 import numpy as np
 import torch
@@ -10,7 +10,18 @@ from calfp.modules import *
 
 __all__ = ['CALFP', 'LinearPredictor', 'SupCALFP', 'LinCALFP', 'BinCALFP']
 
-def pad_to_length(x, length):
+
+def pad_to_length(x, length: int):
+    """
+    Pad or truncate a tensor along the sequence length dimension to a fixed length.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape [B, L, D] or [B, L].
+        length (int): Desired sequence length.
+
+    Returns:
+        torch.Tensor: Padded or truncated tensor of shape [B, length, D].
+    """
     if x.dim() == 2:
         x = x.unsqueeze(-1)
     if x.size(1) > length:
@@ -19,7 +30,19 @@ def pad_to_length(x, length):
         return F.pad(x, (0, 0, 0, length - x.size(1)))
     return x
 
+
 class EmbeddingLayer(nn.Module):
+    """
+    Embedding layer for peptides and MHC sequences.
+
+    Args:
+        emb_size (int): Embedding dimension.
+        vocab_size (int): Vocabulary size (default: len(ACIDS)).
+        padding_idx (int): Index used for padding tokens.
+        peptide_pad (int): Number of padding residues on each side.
+        mhc_len (int): Length of MHC sequence.
+    """
+
     def __init__(self, *, emb_size, vocab_size=len(ACIDS), padding_idx=0, peptide_pad=3, mhc_len=34, **kwargs):
         super(EmbeddingLayer, self).__init__()
         self.peptide_emb = nn.Embedding(vocab_size, emb_size)
@@ -27,6 +50,12 @@ class EmbeddingLayer(nn.Module):
         self.peptide_pad, self.padding_idx, self.mhc_len = peptide_pad, padding_idx, mhc_len
 
     def forward(self, peptide_x, mhc_x, *args, **kwargs):
+        """
+        Embed peptide and MHC sequences.
+
+        Returns:
+            tuple: (peptide embeddings, MHC embeddings, peptide mask)
+        """
         masks = peptide_x[:, self.peptide_pad: peptide_x.shape[1] - self.peptide_pad] != self.padding_idx
         return self.peptide_emb(peptide_x.long()), self.mhc_emb(mhc_x.long()), masks
 
@@ -36,6 +65,15 @@ class EmbeddingLayer(nn.Module):
 
 
 class MHSA(nn.Module):
+    """
+    Multi-Head Self-Attention with relative positional encoding.
+
+    Args:
+        n_dims (int): Number of input channels.
+        width (int): Sequence width for relative embeddings.
+        heads (int): Number of attention heads.
+    """
+
     def __init__(self, n_dims, width=14, heads=4):
         super(MHSA, self).__init__()
         self.heads = heads
@@ -48,6 +86,9 @@ class MHSA(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x):
+        """
+        Compute self-attention with relative positional encoding.
+        """
         n_batch, C, width = x.size()
         q = self.query(x).view(n_batch, self.heads, C // self.heads, -1)
         k = self.key(x).view(n_batch, self.heads, C // self.heads, -1)
@@ -55,11 +96,11 @@ class MHSA(nn.Module):
 
         content_content = torch.matmul(q.permute(0, 1, 3, 2), k)
 
-        rel_w = self.rel_w  # (1, heads, C//heads, width)
+        rel_w = self.rel_w
         if rel_w.shape[-1] != q.shape[-1]:
-            rel_w = rel_w.squeeze(0)  # (heads, C//heads, width)
-            rel_w = F.interpolate(rel_w, size=q.shape[-1], mode='linear', align_corners=False)  # (heads, C//heads, new_width)
-            rel_w = rel_w.unsqueeze(0)  # (1, heads, C//heads, new_width)
+            rel_w = rel_w.squeeze(0)
+            rel_w = F.interpolate(rel_w, size=q.shape[-1], mode='linear', align_corners=False)
+            rel_w = rel_w.unsqueeze(0)
 
         content_position = torch.matmul(rel_w.permute(0, 1, 3, 2), q)
         energy = content_content + content_position
@@ -69,7 +110,19 @@ class MHSA(nn.Module):
         out = out.view(n_batch, C, width)
         return out
 
+
 class Bottleneck(nn.Module):
+    """
+    Residual bottleneck block with optional MHSA.
+
+    Args:
+        in_planes (int): Input channels.
+        planes (int): Output channels.
+        stride (int): Convolution stride.
+        heads (int): Number of attention heads (used if mhsa=True).
+        mhsa (bool): Whether to use MHSA instead of conv.
+        resolution (int, optional): Input resolution for MHSA.
+    """
     expansion = 1
 
     def __init__(self, in_planes, planes, stride=1, heads=4, mhsa=False, resolution=None):
@@ -104,6 +157,12 @@ class Bottleneck(nn.Module):
 
 
 class CALFP(EmbeddingLayer):
+    """
+    CALFP encoder: convolutional peptide–MHC interaction encoder with residual blocks.
+
+    Combines fingerprint-based and embedding-based representations.
+    """
+
     def __init__(self, *, conv_num, conv_size, conv_off, heads=4, dropout=0.5, pooling=True, **kwargs):
         super(CALFP, self).__init__(**kwargs)
         self.conv_fp = nn.ModuleList(IConv(cn, cs, self.mhc_len) for cn, cs in zip(conv_num, conv_size))
@@ -139,13 +198,12 @@ class CALFP(EmbeddingLayer):
     def forward(self, peptide_x, mhc_x, peptide_fp, mhc_fp, pooling=None, **kwargs):
         peptide_x, mhc_x, masks = super().forward(peptide_x, mhc_x)
 
-        max_fp_len = self.mhc_len  # thường là 34
-
+        max_fp_len = self.mhc_len
         peptide_fp = pad_to_length(peptide_fp, max_fp_len)
         mhc_fp = pad_to_length(mhc_fp, max_fp_len)
 
-        pep_fp = self.conv_pep(peptide_fp.permute(0, 2, 1))  # [B, D, L]
-        mhc_fp = self.conv_mhc(mhc_fp.permute(0, 2, 1))      # [B, D, L]
+        pep_fp = self.conv_pep(peptide_fp.permute(0, 2, 1))
+        mhc_fp = self.conv_mhc(mhc_fp.permute(0, 2, 1))
 
         pep_fp = pep_fp.transpose(1, 2)
         mhc_fp = mhc_fp.transpose(1, 2)
@@ -160,7 +218,6 @@ class CALFP(EmbeddingLayer):
             bn(F.relu(conv(peptide_x[:, off: max(peptide_x.shape[1] - off, off + 1)], mhc_x)))
             for conv, bn, off in zip(self.conv_emb, self.bn_emb, self.conv_off)
         ], dim=1)
-
         emb_out = self.dropout(emb_out)
 
         min_len = min(fp_out.shape[2], emb_out.shape[2])
@@ -180,11 +237,18 @@ class CALFP(EmbeddingLayer):
             x = torch.sigmoid(torch.mean(x, dim=1)).masked_fill(~masks, -np.inf)
         return x
 
+
 class SupCALFP(nn.Module):
+    """
+    Supervised CALFP encoder with a projection head.
+
+    Produces low-dimensional normalized embeddings.
+    """
+
     def __init__(self, *, conv_num, conv_size, conv_off, heads=4, dropout=0.5, pooling=True, **kwargs):
         super().__init__()
         self.encoder = CALFP(conv_num=conv_num, conv_size=conv_size, conv_off=conv_off,
-                              heads=heads, dropout=dropout, pooling=pooling, **kwargs)
+                             heads=heads, dropout=dropout, pooling=pooling, **kwargs)
         self.head = nn.Sequential(
             nn.Dropout(0.2),
             nn.Linear(256, 64),
@@ -198,6 +262,10 @@ class SupCALFP(nn.Module):
 
 
 class LinearPredictor(nn.Module):
+    """
+    Simple linear classifier with sigmoid output.
+    """
+
     def __init__(self, input_size):
         super().__init__()
         self.fc = nn.Linear(input_size, 1)
@@ -207,6 +275,10 @@ class LinearPredictor(nn.Module):
 
 
 class LinCALFP(nn.Module):
+    """
+    Linear classifier on top of CALFP encoder.
+    """
+
     def __init__(self, **kwargs):
         super().__init__()
         self.network = SupCALFP(**kwargs).cuda()
@@ -216,7 +288,14 @@ class LinCALFP(nn.Module):
         features = self.network.encoder(*(x.cuda() for x in inputs), **kwargs)
         return self.classifier(features)
 
+
 class BinCALFP(nn.Module):
+    """
+    Binary CALFP model for peptide–MHC binding.
+
+    Supports both pooled prediction and per-position binding scores.
+    """
+
     def __init__(self, **kwargs):
         super().__init__()
         self.network = SupCALFP(**kwargs).cuda()
@@ -226,5 +305,7 @@ class BinCALFP(nn.Module):
         return self.network.encoder(*(x.cuda() for x in inputs), **kwargs)
 
     def forward_binding(self, peptide_x, mhc_x, peptide_fp, mhc_fp):
-        # Không dùng pooling => trả về score theo từng vị trí
+        """
+        Forward pass without pooling — returns position-wise binding scores.
+        """
         return self.network.encoder(peptide_x, mhc_x, peptide_fp, mhc_fp, pooling=False)

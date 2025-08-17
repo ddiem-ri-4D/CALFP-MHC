@@ -1,34 +1,56 @@
-name: calfp
-path: models/pre_models
+# =============================================================================
+# CALFP Pre-Training Configuration
+# =============================================================================
+# General information
+name: calfp                      # Model name identifier
+path: models/pre_models          # Path to save pretrained model checkpoints
 
+# -----------------------------------------------------------------------------
+# Model architecture parameters
+# -----------------------------------------------------------------------------
 model:
-  emb_size: 16
-  conv_size: [ 9 ]
-  conv_num: [ 64 ]
-  conv_off: [ 3 ]
-  dropout: 0.25
-  peptide_pad: 3
+  emb_size: 16                   # Embedding size for amino acid fingerprints
+  conv_size: [ 9 ]               # Convolution kernel sizes
+  conv_num: [ 64 ]               # Number of convolution filters per kernel size
+  conv_off: [ 3 ]                # Convolution offset parameter
+  dropout: 0.25                  # Dropout probability
+  peptide_pad: 3                 # Padding size for peptide sequences
 
+# -----------------------------------------------------------------------------
+# Sequence padding settings (used during pretraining)
+# -----------------------------------------------------------------------------
 padding:
-  peptide_len: 24
-  peptide_pad: 3
-  mhc_len: 34
+  peptide_len: 24                # Maximum peptide length after padding
+  peptide_pad: 3                 # Additional padding tokens for peptides
+  mhc_len: 34                    # Maximum MHC length after padding
 
+# -----------------------------------------------------------------------------
+# Binding-specific padding (used in BindingDataset during pretraining)
+# -----------------------------------------------------------------------------
 binding:
-  peptide_len: 24
-  peptide_pad: 3
-  mhc_len: 34
+  peptide_len: 24                # Maximum peptide length for binding prediction
+  peptide_pad: 3                 # Additional padding tokens for peptides
+  mhc_len: 34                    # Maximum MHC length for binding prediction
 
+# -----------------------------------------------------------------------------
+# Training configuration
+# -----------------------------------------------------------------------------
 train:
-  batch_size: 512
-  num_epochs: 30
+  batch_size: 512                # Training batch size (larger for pretraining)
+  num_epochs: 30                 # Number of pretraining epochs
   opt_params:
-    optimizer_cls: Adam
-    lr: 0.01
-    weight_decay: 1e-4
+    optimizer_cls: Adam           # Optimizer class
+    lr: 0.01                      # Learning rate
+    weight_decay: 1e-4            # Weight decay (L2 regularization)
 
+# -----------------------------------------------------------------------------
+# Validation configuration
+# -----------------------------------------------------------------------------
 valid:
-  batch_size: 128
+  batch_size: 128                # Validation batch size
 
+# -----------------------------------------------------------------------------
+# Testing configuration
+# -----------------------------------------------------------------------------
 test:
-  batch_size: 128
+  batch_size: 128                # Test/evaluation batch size
