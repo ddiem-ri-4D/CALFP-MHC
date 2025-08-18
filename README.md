@@ -33,22 +33,19 @@ conda activate CALFP
 
 The model requires **Parquet** format (`.parquet`) with at least the following columns:
 
-| Peptide       | MHC       | Label |
-|---------------|-----------|-------|
-| AASSYGQNFV    | QIKVRVDMV | 1     |
-| AIRAGGDEQ     | HSKKKCDEL | 1     |
-| AISETDKLG     | LPPIVAKEI | 1     |
-| SARDRVRTDTQY  | FVSKLYYFE | 0     |
-| SARDRVRTDTQY  | KLSHQPVLL | 0     |
+| Peptide          | Allele    | MHC sequence (pseudosequence)          | Label |
+|---------------   |-----------|----------------------------------------|-------|
+| SAVRLRSSVPGVR    | DRB1_0401 | QEFFIASGAAVDAIMEVHFDYYDLQKATYHVGFT     | 1     |
+| NPVVHFFKNIVTPRTP | DRB5_0101 | QEFFIASGAAVDAIMQDYFHDYDFDRATYHVGFT     | 0     |
+| ENPVVHFFKNIVTP   | DRB1_1501 | QEFFIASGAAVDAIMWPRFDYFDIQAATYHVVFT     | 1     |
+| SAVRLRSSVPGVR    | DRB1_0402 | QEFFIASGAAVDAIMEVHFDYYDIDEATYHVVFT     | 0     |
+| MPLAQMLLPTAMRMKM | DRB1_0101 | QEFFIASGAAVDAIMWLFLECYDLQRATYHVGFT     | 1     |
 
-**Columns**:
-- **Peptide**: amino acid sequence of the peptide  
-- **MHC**: amino acid sequence of the MHC allele  
-- **Label**: binding indicator (`1` = binding, `0` = non-binding) — only required for training  
-
-Example files:
-- `train.parquet` — training set  
-- `test.parquet` — independent test set  
+**Columns**:  
+- **Peptide** — amino acid sequence of the peptide  
+- **Allele** — HLA class II allele identifier (e.g., `DRB1_0401`, `DRB5_0101`)  
+- **MHC sequence** — pseudosequence of the MHC allele  
+- **Label** — binding indicator (`1` = binding, `0` = non-binding), required only for training   
 
 ---
 ## How to Run CALFP-MHC
@@ -73,3 +70,5 @@ python -u calfp_fine_tuning.py -d config/data.yaml --mode lomo
 
 ## Citation
 If you use this code or data in your research, please cite:
+
+
