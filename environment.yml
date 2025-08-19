@@ -1,4 +1,4 @@
-name: calfp
+name: CALFP
 channels:
   - salilab
   - conda-forge
