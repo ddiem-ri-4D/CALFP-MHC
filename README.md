@@ -2,7 +2,7 @@
 
 This repository contains code and data for training and evaluating **CALFP-MHC**, a deep learning framework that leverages **repurposed amino acid molecular fingerprints** for supervised contrastive learning in predicting MHC class I and II peptide binding.
 
-![pipeline](https://github.com/ddiem-ri-4D/CALFP-MHC/blob/main/figs/calfp_model.png)
+![pipeline](https://github.com/ddiem-ri-4D/CALFP-MHC/blob/main/figs/CALFP.png)
 
 ---
 
