@@ -52,20 +52,20 @@ The model requires **Parquet** format (`.parquet`) with at least the following c
 
 ### 1. Train and evaluate on an independent test set
 ```bash
-python -u calfp_pretrain.py -d config/data.yaml --mode train
-python -u calfp_fine_tuning.py -d config/data.yaml --mode train
+python3 calfp_pretrain.py -d config/data.yaml --mode train
+python3 calfp_fine_tuning.py -d config/data.yaml --mode train
 ```
 
 ### 2. 5-fold cross-validation
 ```bash 
-python -u calfp_pretrain.py -d config/data.yaml --mode 5cv
-python -u calfp_fine_tuning.py -d config/data.yaml --mode 5cv
+python3 calfp_pretrain.py -d config/data.yaml --mode 5cv
+python3 calfp_fine_tuning.py -d config/data.yaml --mode 5cv
 ```
 
-### 3. Leave-One-Molecule-Out cross-validation
-```bash
-python -u calfp_pretrain.py -d config/data.yaml --mode lomo
-python -u calfp_fine_tuning.py -d config/data.yaml --mode lomo
+### 3. Binding core prediction (after model training)
+```bash 
+python3 calfp_fine_tuning.py -d config/data.yaml --mode binding
+python3 calfp_fine_tuning.py -d config/data.yaml --mode binding --save-csv results/binding_prediction.csv
 ```
 
 ## Citation
