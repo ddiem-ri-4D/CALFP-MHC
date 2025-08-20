@@ -368,7 +368,6 @@ def main(data_cnf, model_cnf, mode, continue_train, start_id, num_models, allele
             df.to_csv(save_csv, index=False)
             logger.info(f"Saved prediction results to {save_csv}")
 
-
     elif mode == 'seq2logo':
         assert allele in mhc_name_seq
         data_list = get_seq2logo_data(data_cnf['seq2logo'], allele, mhc_name_seq[allele])
