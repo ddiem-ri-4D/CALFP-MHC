@@ -8,9 +8,9 @@ This repository contains code and data for training and evaluating **CALFP-MHC**
 
 ## Requirements
 
-- Python >= 3.6.8  
-- Keras == 2.6.0  
-- TensorFlow == 2.6.0  
+- python >= 3.6.8  
+- torch==2.6.0
+- torchvision==0.21.0
 - Other dependencies are listed in `environment.yml`
 
 ---
