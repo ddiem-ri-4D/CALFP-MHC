@@ -64,7 +64,6 @@ python3 calfp_fine_tuning.py -d config/data.yaml --mode 5cv
 
 ### 3. Binding core prediction (after model training)
 ```bash 
-python3 calfp_fine_tuning.py -d config/data.yaml --mode binding
 python3 calfp_fine_tuning.py -d config/data.yaml --mode binding --save-csv results/binding_prediction.csv
 ```
 
