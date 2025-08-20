@@ -11,6 +11,8 @@ This repository contains code and data for training and evaluating **CALFP-MHC**
 - python >= 3.6.8  
 - torch==2.6.0
 - torchvision==0.21.0
+- numpy==2.0.2
+- pyyaml==6.0.2
 - Other dependencies are listed in `environment.yml`
 
 ---
