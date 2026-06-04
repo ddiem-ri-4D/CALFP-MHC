@@ -1,6 +1,6 @@
 # CALFP-MHC: Molecular Fingerprint Representations and Supervised Contrastive Learning for Pan-Allelic Peptide–MHC Binding and Presentation Prediction 
 
-This repository contains code and data for training and evaluating **CALFP-MHC**, a deep learning framework that leverages **repurposed amino acid molecular fingerprints** for supervised contrastive learning in predicting MHC class I and II peptide binding.
+A deep learning framework using **repurposed amino acid molecular fingerprints** and **supervised contrastive learning** to jointly predict peptide–MHC **binding affinity (BA)** and **presentation probability (PB)** for both **HLA class I and class II** in a single unified model.
 
 ![pipeline](https://github.com/ddiem-ri-4D/CALFP-MHC/blob/main/figs/CALFP_v2.png)
 
@@ -47,26 +47,29 @@ The model requires **Parquet** format (`.parquet`) with at least the following c
 - **peptide** — amino acid sequence of the peptide  
 - **Allele** — HLA class II allele identifier (e.g., `HLA-B*08:01`, `HLA-A*01:01`)
 ---
-## How to Run CALFP-MHC
+## Test
 
-### 1. Train and evaluate on an independent test set
+To test your installation, make sure you are in the CALFP-MHC directory and run:
+
 ```bash
-python3 calfp_pretrain.py -d config/data.yaml --mode train
-python3 calfp_fine_tuning.py -d config/data.yaml --mode train
+python CALFP_MHC.py --input test.parquet --output test_out.parquet
 ```
 
-### 2. 5-fold cross-validation
-```bash 
-python3 calfp_pretrain.py -d config/data.yaml --mode 5cv
-python3 calfp_fine_tuning.py -d config/data.yaml --mode 5cv
-```
+## Usage
 
-### 3. Binding core prediction (after model training)
-```bash 
-python3 calfp_fine_tuning.py -d config/data.yaml --mode binding --save-csv results/binding_prediction.csv
-```
+`CALFP_MHC.py` is used for making predictions of binding affinity (BA) and presentation score (PB) for HLA class I and class II.
+
+## Supported HLA Alleles
+
+CALFP-MHC supports pan-allelic prediction for:
+- **HLA class I**: HLA-A, HLA-B, HLA-C (48 alleles benchmarked)
+- **HLA class II**: HLA-DR, HLA-DP, HLA-DQ (53 alleles benchmarked)
+
+For a full list of supported alleles, see `data/supported_alleles.txt`.
+
+---
 
 ## Citation
-If you use this code or data in your research, please cite:
 
+If you use this code or data in your research, please cite:
 
