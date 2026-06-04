@@ -35,20 +35,17 @@ conda activate CALFP
 
 The model requires **Parquet** format (`.parquet`) with at least the following columns:
 
-| Peptide          | Allele    | MHC sequence (pseudosequence)          | Label |
-|---------------   |-----------|----------------------------------------|-------|
-| SAVRLRSSVPGVR    | DRB1_0401 | QEFFIASGAAVDAIMEVHFDYYDLQKATYHVGFT     | 1     |
-| NPVVHFFKNIVTPRTP | DRB5_0101 | QEFFIASGAAVDAIMQDYFHDYDFDRATYHVGFT     | 0     |
-| ENPVVHFFKNIVTP   | DRB1_1501 | QEFFIASGAAVDAIMWPRFDYFDIQAATYHVVFT     | 1     |
-| SAVRLRSSVPGVR    | DRB1_0402 | QEFFIASGAAVDAIMEVHFDYYDIDEATYHVVFT     | 0     |
-| MPLAQMLLPTAMRMKM | DRB1_0101 | QEFFIASGAAVDAIMWLFLECYDLQRATYHVGFT     | 1     |
+| peptide          | Allele Name |
+|---------------   |-------------|
+| SAVRLRSSVPGVR    | HLA-B*08:01 | 
+| NPVVHFFKNIVTPRTP | HLA-A*02:01 | 
+| ENPVVHFFKNIVTP   | HLA-B*18:01 |
+| SAVRLRSSVPGVR    | HLA-A*01:01 | 
+| MPLAQMLLPTAMRMKM | HLA-A*02:01 | 
 
 **Columns**:  
-- **Peptide** — amino acid sequence of the peptide  
-- **Allele** — HLA class II allele identifier (e.g., `DRB1_0401`, `DRB5_0101`)  
-- **MHC sequence** — pseudosequence of the MHC allele  
-- **Label** — binding indicator (`1` = binding, `0` = non-binding), required only for training   
-
+- **peptide** — amino acid sequence of the peptide  
+- **Allele** — HLA class II allele identifier (e.g., `HLA-B*08:01`, `HLA-A*01:01`)
 ---
 ## How to Run CALFP-MHC
 
