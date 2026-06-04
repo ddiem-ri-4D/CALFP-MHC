@@ -15,16 +15,6 @@ conda env create -f calfp.yaml
 conda activate CALFP
 ```
 
----
-## Test
-
-To test your installation, make sure you are in the CALFP-MHC directory and run:
-
-```bash
-python CALFP_MHC.py --input test.parquet --output test_out.parquet
-```
-
----
 ## Usage
 
 `CALFP_MHC.py` is used for making predictions of binding affinity (BA) and presentation score (PB) for HLA class I and class II.
