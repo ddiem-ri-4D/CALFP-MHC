@@ -29,7 +29,7 @@ python CALFP_MHC.py --input test.parquet --output test_out.parquet --gpu False -
 
 The input CSV file requires the following columns:
 
-| peptide | allele |
+| peptide | Allele Name |
 |---|---|
 | GILGFVFTL | HLA-A*02:01 |
 | SAVRLRSSVPGVR | HLA-B*08:01 |
@@ -40,7 +40,7 @@ The input CSV file requires the following columns:
 ---
 ## Output Format
 
-| peptide | allele | PB_score | BA_score |
+| peptide | Allele Name | PB_score | BA_score |
 |---|---|---|---|
 | GILGFVFTL | HLA-A*02:01 | 0.91 | 0.87 |
 | SAVRLRSSVPGVR | HLA-B*08:01 | 0.74 | 0.65 |
