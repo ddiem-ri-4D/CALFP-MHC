@@ -21,7 +21,7 @@ conda activate CALFP
 To test your installation, make sure you are in the CALFP-MHC directory and run:
 
 ```bash
-python CALFP_MHC.py --input test.csv --output test_out.csv
+python CALFP_MHC.py --input test.parquet --output test_out.parquet
 ```
 
 ---
@@ -32,7 +32,7 @@ python CALFP_MHC.py --input test.csv --output test_out.csv
 ### Command
 
 ```bash
-python CALFP_MHC.py --input test.csv --output test_out.csv --gpu False --BA True
+python CALFP_MHC.py --input test.parquet --output test_out.parquet --gpu False --BA True
 ```
 
 ## Input Format
