@@ -1,4 +1,4 @@
-# CALFP-MHC: Repurposing amino acid molecular fingerprints for supervised contrastive learning in MHC class I and II peptide binding prediction
+# CALFP-MHC: Molecular Fingerprint Representations and Supervised Contrastive Learning for Pan-Allelic Peptide–MHC Binding and Presentation Prediction 
 
 This repository contains code and data for training and evaluating **CALFP-MHC**, a deep learning framework that leverages **repurposed amino acid molecular fingerprints** for supervised contrastive learning in predicting MHC class I and II peptide binding.
 
