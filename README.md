@@ -36,7 +36,7 @@ The input CSV file requires the following columns:
 | PKYVKQNTLKLAT | HLA-DRB1*03:01 |
 
 - **peptide** — amino acid sequence (HLA-I: 8–11 aa; HLA-II: 13–18 aa)
-- **allele** — HLA allele in standard format (e.g. `HLA-A*02:01`, `HLA-DRB1*03:01`)
+- **Allele Name** — HLA allele in standard format (e.g. `HLA-A*02:01`, `HLA-DRB1*03:01`)
 ---
 ## Output Format
 
