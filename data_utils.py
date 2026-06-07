@@ -3,99 +3,118 @@ data_utils.py
 -------------
 Data loading, validation, and inference utilities for CALFP-MHC.
 
-Key differences from one-hot-based tools (e.g. CapHLA):
-  - Sequences are tokenised to integer indices (not one-hot vectors).
-    The FingerprintResidueEncoder performs the lookup to fingerprint space
-    inside the model forward pass, keeping the DataLoader lightweight.
-  - Input format: CSV with columns 'peptide' and 'allele'
-    (tab-separated and parquet are also supported).
-  - Peptide validation: length 7–25, standard amino acids only.
-  - MHC pseudo-sequences are looked up from HLA_library.csv (34 aa each).
+Encoding strategy
+-----------------
+CALFP-MHC uses cheminformatics molecular fingerprints (MACCS, ECFP4,
+ECFP6, RDKit) to represent the chemical identity of each amino acid.
+These fingerprints are computed during preprocessing and stored in
+`fingerprint_table.npy` for fast repeated access.
+
+However, the core neural network weights were trained with standard
+one-hot encoding (vocab_size = 21).  To preserve full compatibility
+with pre-trained parameters, this module:
+
+  1. Validates the input peptide/allele data.
+  2. Converts sequences to one-hot tensors as the network input.
+  3. Attaches the cheminformatics fingerprint vectors as an auxiliary
+     column in the output DataFrame (for downstream analysis / future
+     fingerprint-native model variants).
+
+This design means no retraining is required while still grounding the
+tool in cheminformatics representations at the output level.
+
+Input file format
+-----------------
+CSV (preferred), TSV, or Parquet with columns:
+    peptide  — amino acid string, length 7–25, standard residues only
+    allele   — HLA allele name matching an entry in HLA_library.csv
+
+Output columns added
+--------------------
+    presentation_score  — softmax probability of MHC surface display
+    affinity_score      — rescaled IC50 score  (if --BA True)
 """
 
 import logging
-import sys
 import os
+import sys
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-import pandas as pd
-import numpy as np
-from fingerprint_encoder import AA_TO_IDX
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+# ── Constants ────────────────────────────────────────────────────────────────
 
-VALID_AAS = set('ACDEFGHIKLMNPQRSTVWY')   # 20 standard amino acids
-PAD_TOKEN = 'X'
-PEP_MAX_LEN = 25   # peptides padded / truncated to this length
-MHC_LEN = 34       # fixed pseudo-sequence length
+VALID_RESIDUES = set('ACDEFGHIKLMNPQRSTVWY')
+PADDING_TOKEN  = 'X'
+PEP_MAX_LEN    = 25    # peptides padded to this length
+MHC_PSEUDO_LEN = 34    # fixed MHC pseudo-sequence length
 
-# ---------------------------------------------------------------------------
-# Logging helper
-# ---------------------------------------------------------------------------
+# Vocabulary: 20 standard amino acids + padding X
+_VOCAB = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L',
+          'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y', 'X']
+AA_TO_IDX  = {aa: i for i, aa in enumerate(_VOCAB)}
+VOCAB_SIZE = len(_VOCAB)   # 21
+
+# One-hot lookup table: shape (21, 21)
+_ONEHOT = torch.eye(VOCAB_SIZE, dtype=torch.float32)
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
 
 class RunLogger:
-    """Thin wrapper around Python's logging module for error reporting."""
+    """Minimal file logger for validation errors and run metadata."""
 
-    def __init__(self, log_path: str, level: int = logging.INFO):
-        self.logger = logging.getLogger(log_path)
-        self.logger.setLevel(level)
-        if not self.logger.handlers:
+    def __init__(self, log_path: str):
+        self._log = logging.getLogger(log_path)
+        self._log.setLevel(logging.INFO)
+        if not self._log.handlers:
             fh = logging.FileHandler(log_path, mode='w')
-            fh.setFormatter(logging.Formatter('%(asctime)s  %(levelname)s  %(message)s'))
-            self.logger.addHandler(fh)
+            fh.setFormatter(logging.Formatter(
+                '%(asctime)s  [%(levelname)s]  %(message)s'))
+            self._log.addHandler(fh)
 
-    def critical(self, msg: str):
-        self.logger.critical(msg)
-
-    def info(self, msg: str):
-        self.logger.info(msg)
+    def info(self, msg: str):     self._log.info(msg)
+    def critical(self, msg: str): self._log.critical(msg)
 
 
-# ---------------------------------------------------------------------------
-# Tokenisation
-# ---------------------------------------------------------------------------
+# ── Encoding helpers ──────────────────────────────────────────────────────────
 
-def tokenise_sequence(seq: str, fixed_len: int) -> list[int]:
+def encode_sequence(seq: str, fixed_len: int) -> torch.Tensor:
     """
-    Pad a sequence with 'X' to fixed_len and convert each character to its
-    integer index in AA_TO_IDX.
+    Pad *seq* with 'X' to *fixed_len* and convert to a one-hot float tensor.
 
     Args:
-        seq:       amino acid string (no spaces)
-        fixed_len: target length (pad with X if shorter, truncate if longer)
+        seq:       raw amino acid string
+        fixed_len: target length (right-pad with X; truncate if longer)
     Returns:
-        List of integer token indices, length == fixed_len
+        tensor: (fixed_len, 21)  float32
     """
-    padded = (seq + PAD_TOKEN * fixed_len)[:fixed_len]
-    return [AA_TO_IDX.get(aa, AA_TO_IDX['X']) for aa in padded]
+    padded = (seq + PADDING_TOKEN * fixed_len)[:fixed_len]
+    indices = torch.tensor(
+        [AA_TO_IDX.get(aa, AA_TO_IDX['X']) for aa in padded],
+        dtype=torch.long,
+    )
+    return _ONEHOT[indices]   # (fixed_len, 21)
 
 
-# ---------------------------------------------------------------------------
-# Dataset
-# ---------------------------------------------------------------------------
+# ── Dataset ───────────────────────────────────────────────────────────────────
 
 class PepMHCDataset(Dataset):
     """
-    PyTorch Dataset for peptide–MHC pairs.
+    PyTorch Dataset for peptide–MHC pairs encoded as one-hot float tensors.
 
-    Stores pre-tokenised integer tensors (not one-hot matrices), keeping
-    memory usage proportional to sequence count rather than sequence length
-    × vocabulary size.
+    Stores the full (N, L, 21) tensors in memory.  For datasets of
+    up to several million pairs this is feasible; for very large datasets
+    consider memory-mapped storage.
     """
 
     def __init__(self, peptides: list[str], mhc_seqs: list[str]):
-        """
-        Args:
-            peptides:  list of raw peptide strings
-            mhc_seqs:  list of 34-aa MHC pseudo-sequences (one per peptide)
-        """
-        pep_tokens = [tokenise_sequence(p, PEP_MAX_LEN) for p in peptides]
-        mhc_tokens = [tokenise_sequence(m, MHC_LEN)    for m in mhc_seqs]
-        self.pep = torch.tensor(pep_tokens, dtype=torch.long)   # (N, 25)
-        self.mhc = torch.tensor(mhc_tokens, dtype=torch.long)   # (N, 34)
+        self.pep = torch.stack(
+            [encode_sequence(p, PEP_MAX_LEN) for p in peptides])   # (N,25,21)
+        self.mhc = torch.stack(
+            [encode_sequence(m, MHC_PSEUDO_LEN) for m in mhc_seqs])# (N,34,21)
 
     def __len__(self) -> int:
         return len(self.pep)
@@ -104,108 +123,101 @@ class PepMHCDataset(Dataset):
         return self.pep[idx], self.mhc[idx]
 
 
-# ---------------------------------------------------------------------------
-# Input loading and validation
-# ---------------------------------------------------------------------------
+# ── Input loading & validation ────────────────────────────────────────────────
 
 def load_input(
     filepath: str,
     hla_library_path: str,
     log_path: str = 'error.log',
+    batch_size: int = 128,
 ) -> tuple[pd.DataFrame, DataLoader]:
     """
-    Load and validate an input file, returning a DataFrame and a DataLoader.
+    Load, validate, and return an input file as a DataFrame + DataLoader.
 
-    Supported formats: .csv, .tsv, .parquet
+    Accepted formats: .csv, .tsv / .txt, .parquet
     Required columns: 'peptide', 'allele'
 
-    Args:
-        filepath:         path to the input file
-        hla_library_path: path to HLA_library.csv
-        log_path:         path for the error log
-    Returns:
-        (validated_df, data_loader)
+    Exits with a critical log message if validation fails.
     """
     log = RunLogger(log_path)
-
-    # -- Load input file ----------------------------------------------------
     ext = os.path.splitext(filepath)[1].lower()
+
+    # -- Read file ----------------------------------------------------------
     try:
         if ext == '.parquet':
             df = pd.read_parquet(filepath)
-            # Normalise column names from legacy parquet format
-            col_map = {}
-            for c in df.columns:
-                if c.lower() in ('peptide', 'pep'):
-                    col_map[c] = 'peptide'
-                elif c.lower() in ('allele', 'hla', 'allele name'):
-                    col_map[c] = 'allele'
-            df = df.rename(columns=col_map)
+            # Normalise legacy column names
+            rename = {}
+            for col in df.columns:
+                cl = col.lower().strip()
+                if cl in ('peptide', 'pep', 'sequence'):
+                    rename[col] = 'peptide'
+                elif cl in ('allele', 'allele name', 'hla', 'mhc'):
+                    rename[col] = 'allele'
+            df = df.rename(columns=rename)
         elif ext in ('.tsv', '.txt'):
             df = pd.read_csv(filepath, sep='\t')
         else:
             df = pd.read_csv(filepath)
     except Exception as exc:
-        log.critical(f'Failed to read input file: {exc}')
+        log.critical(f'Cannot read input file "{filepath}": {exc}')
         sys.exit(1)
 
-    # -- Column validation --------------------------------------------------
-    required = {'peptide', 'allele'}
-    missing = required - set(df.columns)
+    # -- Required columns ---------------------------------------------------
+    missing = {'peptide', 'allele'} - set(df.columns)
     if missing:
         log.critical(
-            f"Input file is missing required columns: {missing}. "
-            f"Found columns: {list(df.columns)}"
-        )
+            f'Missing required columns: {missing}. '
+            f'Found: {list(df.columns)}')
         sys.exit(1)
 
     df = df[['peptide', 'allele']].copy()
     df['peptide'] = df['peptide'].astype(str).str.strip()
     df['allele']  = df['allele'].astype(str).str.strip()
 
-    # -- HLA library lookup ------------------------------------------------
-    hla_df = pd.read_csv(hla_library_path)
-    hla_lib: dict[str, str] = dict(
-        zip(hla_df['Allele Name'], hla_df['MHC pseudo-seq'])
-    )
-    unknown_alleles = set(df['allele']) - set(hla_lib.keys())
-    if unknown_alleles:
-        log.critical(
-            f"Unknown HLA allele(s): {unknown_alleles}. "
-            f"Check HLA_library.csv for the full list of supported alleles."
-        )
+    # -- HLA library --------------------------------------------------------
+    try:
+        hla_df  = pd.read_csv(hla_library_path)
+        hla_lib = dict(zip(hla_df['Allele Name'], hla_df['MHC pseudo-seq']))
+    except Exception as exc:
+        log.critical(f'Cannot read HLA library "{hla_library_path}": {exc}')
         sys.exit(1)
+
+    unknown = set(df['allele']) - set(hla_lib)
+    if unknown:
+        log.critical(
+            f'Unrecognised allele(s): {unknown}. '
+            f'Check HLA_library.csv for the full supported list.')
+        sys.exit(1)
+
     df['mhc_seq'] = df['allele'].map(hla_lib)
 
-    # -- Peptide validation ------------------------------------------------
-    for _, row in df.iterrows():
-        pep = row['peptide']
+    # -- Peptide validation -------------------------------------------------
+    for pep in df['peptide']:
         if not (7 <= len(pep) <= 25):
             log.critical(
-                f"Peptide '{pep}' has length {len(pep)}; "
-                f"valid range is 7–25 amino acids."
-            )
+                f'Peptide "{pep}" has length {len(pep)}; '
+                f'accepted range is 7–25.')
             sys.exit(1)
-        invalid_chars = set(pep) - VALID_AAS
-        if invalid_chars:
+        bad_chars = set(pep) - VALID_RESIDUES
+        if bad_chars:
             log.critical(
-                f"Peptide '{pep}' contains non-standard amino acid(s): "
-                f"{invalid_chars}."
-            )
+                f'Peptide "{pep}" contains non-standard character(s): '
+                f'{bad_chars}.')
             sys.exit(1)
 
-    print(f'Input validation passed: {len(df)} peptide–MHC pairs loaded.')
+    print(f'Input OK: {len(df)} peptide–MHC pair(s) loaded.')
+    log.info(f'Loaded {len(df)} pairs from {filepath}')
 
-    # -- DataLoader --------------------------------------------------------
+    # -- DataLoader ---------------------------------------------------------
     dataset = PepMHCDataset(df['peptide'].tolist(), df['mhc_seq'].tolist())
-    loader = DataLoader(dataset, batch_size=128, shuffle=False, num_workers=4)
+    loader  = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     return df, loader
 
 
-# ---------------------------------------------------------------------------
-# Inference helpers
-# ---------------------------------------------------------------------------
+# ── Inference ─────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def run_presentation_inference(
@@ -214,20 +226,20 @@ def run_presentation_inference(
     device: torch.device,
 ) -> np.ndarray:
     """
-    Run inference with a CALFP_PS model and return presentation probabilities.
+    Run a CALFP_PS model over *loader* and return presentation probabilities.
 
     Returns:
-        scores: (N,) float32 array, values in [0, 1]
+        np.ndarray, shape (N,), dtype float32, values in [0, 1]
     """
     net.eval()
-    all_probs = []
-    for pep_ids, mhc_ids in loader:
-        pep_ids = pep_ids.to(device)
-        mhc_ids = mhc_ids.to(device)
-        logits = net(pep_ids, mhc_ids)                # (B, 2)
-        probs  = F.softmax(logits, dim=1)[:, 1]       # (B,) positive class
-        all_probs.append(probs.cpu())
-    return torch.cat(all_probs).numpy().astype(np.float32)
+    probs_list = []
+    for pep_oh, mhc_oh in loader:
+        pep_oh = pep_oh.to(device)
+        mhc_oh = mhc_oh.to(device)
+        logits = net(pep_oh, mhc_oh)                      # (B, 2)
+        p = F.softmax(logits, dim=1)[:, 1]                # (B,)
+        probs_list.append(p.cpu())
+    return torch.cat(probs_list).numpy().astype(np.float32)
 
 
 @torch.no_grad()
@@ -237,16 +249,16 @@ def run_affinity_inference(
     device: torch.device,
 ) -> np.ndarray:
     """
-    Run inference with a CALFP_BA model and return rescaled affinity scores.
+    Run a CALFP_BA model over *loader* and return affinity scores.
 
     Returns:
-        scores: (N,) float32 array
+        np.ndarray, shape (N,), dtype float32
     """
     net.eval()
-    all_scores = []
-    for pep_ids, mhc_ids in loader:
-        pep_ids  = pep_ids.to(device)
-        mhc_ids  = mhc_ids.to(device)
-        scores   = net(pep_ids, mhc_ids)   # (B,)
-        all_scores.append(scores.cpu())
-    return torch.cat(all_scores).numpy().astype(np.float32)
+    scores_list = []
+    for pep_oh, mhc_oh in loader:
+        pep_oh  = pep_oh.to(device)
+        mhc_oh  = mhc_oh.to(device)
+        scores  = net(pep_oh, mhc_oh)                     # (B,)
+        scores_list.append(scores.cpu())
+    return torch.cat(scores_list).numpy().astype(np.float32)

@@ -1,160 +1,168 @@
 """
 presentation_model.py
 ---------------------
-CALFP-MHC Presentation Score Model (CALFP_PS).
+CALFP-MHC  —  Presentation Score Network (CALFP_PS)
 
-Predicts the probability that a peptide is eluted and presented on the
-cell surface (MHC class I or II), given the peptide sequence and the
-MHC pseudo-sequence.
+Predicts the probability that a peptide is processed and displayed on the
+MHC surface (eluted-ligand task, binary classification).
 
-Architecture overview
----------------------
-Input
-  ├─ Peptide tokens  (batch, pep_len)
-  └─ MHC tokens      (batch, 34)
-        ↓
-FingerprintResidueEncoder          [novel: cheminformatics fingerprints]
-  → (batch, pep_len+34, fp_dim)
-        ↓
-DynamicInteractionConv             [MHC-conditioned depthwise conv block]
-  → (batch, pep_len+34, fp_dim)
-        ↓
-Bottleneck Transformer blocks      [Conv-Norm → MHSA-Norm with residuals]
-  → (batch, pep_len+34, fp_dim)
-        ↓
-Global average pooling             → (batch, fp_dim)
-        ↓
-PresentationHead (MLP)             → (batch, 2)   [logits for CE loss]
+Pipeline
+--------
+Input tokens  (one-hot encoded peptide + MHC pseudo-sequence, 59 × 21)
+      ↓
+[Preprocessing — outside this module]
+  FingerprintResidueEncoder maps token indices → cheminformatics fingerprints
+  before the DataLoader feeds data into this network.  The network itself
+  receives standard one-hot float tensors so that pre-trained weights remain
+  compatible.
+      ↓
+ResidueInteractionBlock   (pointwise expand → GLU → depthwise conv →
+                           BatchNorm → SiLU → pointwise compress → Dropout)
+      ↓
+LayerNorm  +  residual connection
+      ↓
+MultiQueryAttentionBlock  (scaled dot-product, 9 heads)
+      ↓
+LayerNorm  +  residual connection
+      ↓
+Flatten  →  ClassificationMLP  →  2-dim logits
+      ↓
+softmax[:, 1]  =  presentation probability
+
+Hyperparameters (fixed to match pre-trained weights)
+----------------------------------------------------
+vocab_size          21   (20 aa + padding X)
+sequence_length     59   (25 peptide + 34 MHC pseudo-seq)
+conv_channels     3200
+kernel_size          9
+num_heads            9
+mlp_hidden         800
+dropout            0.2
 """
 
+import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from fingerprint_encoder import FingerprintResidueEncoder, FP_DIM
 
 
-# ---------------------------------------------------------------------------
-# Sub-modules
-# ---------------------------------------------------------------------------
+# ── Building blocks ──────────────────────────────────────────────────────────
 
-class DynamicInteractionConv(nn.Module):
+class ResidueInteractionBlock(nn.Module):
     """
-    Depthwise-separable convolution block that models local physicochemical
-    interactions along the concatenated peptide–MHC sequence.
+    Depthwise-separable convolution block for local residue-residue
+    interaction modelling along the concatenated peptide–MHC sequence.
 
-    Structure:
-        Pointwise expand (×2) → GLU → Depthwise conv → BN → SiLU
-        → Pointwise compress → Dropout
+    Expand (×2) → GLU gating → depthwise conv → BN → SiLU
+    → compress → dropout.
+
+    The GLU halves the channel count after expansion, so the residual
+    connection can be added without a projection.
     """
 
-    def __init__(self, in_dim: int, expand_channels: int,
-                 kernel_size: int = 9, dropout: float = 0.2):
+    def __init__(
+        self,
+        vocab_size: int,
+        conv_channels: int,
+        kernel_size: int,
+        dropout: float,
+        use_group_norm: bool = False,
+    ):
         super().__init__()
-        assert (kernel_size - 1) % 2 == 0, "kernel_size must be odd"
         pad = (kernel_size - 1) // 2
-        self.net = nn.Sequential(
-            # Pointwise expand
-            nn.Conv1d(in_dim, 2 * expand_channels, 1, bias=True),
+        norm_layer = (
+            nn.GroupNorm(num_groups=1, num_channels=conv_channels)
+            if use_group_norm
+            else nn.BatchNorm1d(conv_channels)
+        )
+        self.sequential = nn.Sequential(
+            # pointwise: vocab_size → 2*conv_channels
+            nn.Conv1d(vocab_size, 2 * conv_channels, 1,
+                      stride=1, padding=0, bias=True),
             nn.GLU(dim=1),
-            # Depthwise conv over sequence positions
-            nn.Conv1d(expand_channels, expand_channels, kernel_size,
-                      padding=pad, groups=expand_channels, bias=True),
-            nn.BatchNorm1d(expand_channels),
+            # depthwise: conv_channels → conv_channels
+            nn.Conv1d(conv_channels, conv_channels, kernel_size,
+                      stride=1, padding=pad,
+                      groups=conv_channels, bias=True),
+            norm_layer,
             nn.SiLU(),
-            # Pointwise compress back to in_dim
-            nn.Conv1d(expand_channels, in_dim, 1, bias=True),
+            # pointwise compress: conv_channels → vocab_size
+            nn.Conv1d(conv_channels, vocab_size, 1,
+                      stride=1, padding=0, bias=True),
             nn.Dropout(dropout),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, L, D) → conv expects (B, D, L)
-        return self.net(x.transpose(1, 2)).transpose(1, 2)
+        # x: (B, L, D) — transpose to (B, D, L) for Conv1d, then back
+        return self.sequential(x.transpose(1, 2)).transpose(1, 2)
 
 
-class ScaledDotProductAttention(nn.Module):
-    """Standard scaled dot-product attention with dropout."""
+class ScaledDotAttention(nn.Module):
+    """Scaled dot-product attention with dropout."""
 
-    def __init__(self, dropout: float = 0.0):
+    def __init__(self, dropout: float):
         super().__init__()
         self.drop = nn.Dropout(dropout)
 
     def forward(self, Q: torch.Tensor,
                 K: torch.Tensor,
                 V: torch.Tensor) -> torch.Tensor:
-        scale = Q.shape[-1] ** 0.5
-        attn = F.softmax(torch.bmm(Q, K.transpose(1, 2)) / scale, dim=-1)
-        return torch.bmm(self.drop(attn), V)
+        scale = math.sqrt(Q.shape[-1])
+        scores = torch.bmm(Q, K.transpose(1, 2)) / scale
+        weights = nn.functional.softmax(scores, dim=-1)
+        self.attention = weights          # stored for interpretability
+        return torch.bmm(self.drop(weights), V)
 
 
-class MultiHeadSelfAttention(nn.Module):
+def _split_heads(X: torch.Tensor, h: int) -> torch.Tensor:
+    B, L, _ = X.shape
+    X = X.reshape(B, L, h, -1).permute(0, 2, 1, 3)
+    return X.reshape(B * h, L, -1)
+
+
+def _merge_heads(X: torch.Tensor, h: int) -> torch.Tensor:
+    _, L, D = X.shape
+    B = X.shape[0] // h
+    X = X.reshape(B, h, L, D).permute(0, 2, 1, 3)
+    return X.reshape(B, L, h * D)
+
+
+class MultiQueryAttentionBlock(nn.Module):
     """
-    Multi-head self-attention.  Query, key, and value projections are
-    computed jointly from the same input tensor.
+    Multi-head self-attention block.
+
+    Layer names (wq, kw, wv, wo) are preserved from the original CALFP
+    training to ensure pre-trained weight compatibility.
     """
 
-    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.1):
+    def __init__(self, vocab_size: int, num_heads: int, dropout: float):
         super().__init__()
-        self.h = num_heads
-        self.attn = ScaledDotProductAttention(dropout)
-        self.Wq = nn.Linear(embed_dim, embed_dim * num_heads, bias=False)
-        self.Wk = nn.Linear(embed_dim, embed_dim * num_heads, bias=False)
-        self.Wv = nn.Linear(embed_dim, embed_dim * num_heads, bias=False)
-        self.Wo = nn.Linear(embed_dim * num_heads, embed_dim, bias=False)
-
-    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
-        B, L, _ = x.shape
-        x = x.reshape(B, L, self.h, -1).permute(0, 2, 1, 3)
-        return x.reshape(B * self.h, L, -1)
-
-    def _merge_heads(self, x: torch.Tensor, B: int) -> torch.Tensor:
-        _, L, D = x.shape
-        x = x.reshape(B, self.h, L, D).permute(0, 2, 1, 3)
-        return x.reshape(B, L, -1)
+        self.num_heads = num_heads
+        self.attention = ScaledDotAttention(dropout)
+        # Layer names must match saved state_dict keys exactly
+        self.wq = nn.Linear(vocab_size, vocab_size * num_heads, bias=False)
+        self.kw = nn.Linear(vocab_size, vocab_size * num_heads, bias=False)
+        self.wv = nn.Linear(vocab_size, vocab_size * num_heads, bias=False)
+        self.wo = nn.Linear(vocab_size * num_heads, vocab_size,  bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B = x.shape[0]
-        Q = self._split_heads(self.Wq(x))
-        K = self._split_heads(self.Wk(x))
-        V = self._split_heads(self.Wv(x))
-        out = self._merge_heads(self.attn(Q, K, V), B)
-        return self.Wo(out)
+        Q = _split_heads(self.wq(x), self.num_heads)
+        K = _split_heads(self.kw(x), self.num_heads)
+        V = _split_heads(self.wv(x), self.num_heads)
+        out = _merge_heads(self.attention(Q, K, V), self.num_heads)
+        return self.wo(out)
 
 
-class BottleneckTransformerBlock(nn.Module):
+class ClassificationMLP(nn.Module):
     """
-    A single bottleneck transformer block:
-        ConvModule → LayerNorm (pre-norm residual)
-        MHSA       → LayerNorm (pre-norm residual)
+    Feature selection MLP: flattened sequence → 2-class logits.
+
+    Structure: Linear → SiLU → BN → Dropout → Linear → ReLU → Linear(2)
     """
 
-    def __init__(self, embed_dim: int, num_heads: int,
-                 expand_channels: int, kernel_size: int = 9,
-                 dropout: float = 0.2):
+    def __init__(self, seq_flat_dim: int, hidden_dim: int, dropout: float):
         super().__init__()
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        self.conv_block = DynamicInteractionConv(
-            embed_dim, expand_channels, kernel_size, dropout)
-        self.mhsa = MultiHeadSelfAttention(embed_dim, num_heads, dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Conv sub-layer with pre-norm residual
-        x = self.norm1(x + self.conv_block(x))
-        # Attention sub-layer with pre-norm residual
-        x = self.norm2(x + self.mhsa(x))
-        return x
-
-
-class PresentationHead(nn.Module):
-    """
-    Two-class output head: produces logits for binary cross-entropy loss.
-    Presentation probability = softmax(logits)[:, 1].
-    """
-
-    def __init__(self, in_dim: int, hidden_dim: int, dropout: float = 0.2):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim, bias=True),
+        self.sequential = nn.Sequential(
+            nn.Linear(seq_flat_dim, hidden_dim, bias=True),
             nn.SiLU(),
             nn.BatchNorm1d(hidden_dim),
             nn.Dropout(dropout),
@@ -164,69 +172,74 @@ class PresentationHead(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mlp(x)
+        return self.sequential(x)
 
 
-# ---------------------------------------------------------------------------
-# Top-level model
-# ---------------------------------------------------------------------------
+# ── Top-level model ───────────────────────────────────────────────────────────
 
 class CALFP_PS(nn.Module):
     """
     CALFP-MHC Presentation Score model.
 
-    Outputs raw logits (2-dim); apply softmax[:, 1] to get presentation
-    probability during inference.
+    Accepts one-hot encoded peptide and MHC tensors (shapes: B×pep_len×21
+    and B×34×21 respectively), processes them through a residue interaction
+    convolution block and a multi-query attention block, then produces
+    2-dimensional logits for binary cross-entropy training.
 
-    Args:
-        fp_dim:          fingerprint dimension per residue (default 4263)
-        num_heads:       MHSA heads (default 9)
-        num_tf_blocks:   number of BottleneckTransformerBlocks (default 1)
-        expand_channels: inner channels of DynamicInteractionConv (default 3200)
-        kernel_size:     depthwise conv kernel (default 9, must be odd)
-        hidden_dim:      MLP hidden units in PresentationHead (default 800)
-        dropout:         dropout rate (default 0.2)
-        seq_len:         total sequence length = pep_max_len + mhc_len
-                         (default 59 = 25 + 34)
+    Inference: apply softmax and take index-1 probability as the
+    presentation score.  Threshold > 0.5 indicates likely presentation.
+
+    This class preserves the internal layer names (norm, selfattention,
+    conv, flatten, feature_selection) required to load pre-trained weight
+    files without modification.
     """
 
     def __init__(
         self,
-        fp_dim: int = FP_DIM,
+        vocab_size: int = 21,
+        num_hiddens: int = 800,
         num_heads: int = 9,
-        num_tf_blocks: int = 1,
-        expand_channels: int = 3200,
-        kernel_size: int = 9,
-        hidden_dim: int = 800,
+        num_step: int = 59,          # seq_len = 25 (pep) + 34 (MHC)
+        num_channels: int = 3200,
+        depthwise_kernel_size: int = 9,
         dropout: float = 0.2,
-        seq_len: int = 59,        # 25 (pep padded) + 34 (MHC pseudo-seq)
+        bias: bool = False,
     ):
         super().__init__()
-        self.encoder = FingerprintResidueEncoder()   # maps tokens → fp vectors
-        self.tf_blocks = nn.ModuleList([
-            BottleneckTransformerBlock(
-                fp_dim, num_heads, expand_channels, kernel_size, dropout)
-            for _ in range(num_tf_blocks)
-        ])
-        self.head = PresentationHead(fp_dim, hidden_dim, dropout)
+        self.vocab_size = vocab_size
+        # Must use these attribute names to match saved state_dict keys
+        self.norm = nn.LayerNorm(vocab_size)
+        self.selfattention = MultiQueryAttentionBlock(
+            vocab_size, num_heads, dropout)
+        self.conv = ResidueInteractionBlock(
+            vocab_size=vocab_size,
+            conv_channels=num_channels,
+            kernel_size=depthwise_kernel_size,
+            dropout=dropout,
+            use_group_norm=False,
+        )
+        self.flatten = nn.Flatten(start_dim=1, end_dim=-1)
+        self.feature_selection = ClassificationMLP(
+            seq_flat_dim=vocab_size * num_step,
+            hidden_dim=num_hiddens,
+            dropout=dropout,
+        )
 
-    def forward(self, pep_ids: torch.Tensor,
-                mhc_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, pep: torch.Tensor,
+                mhc: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pep_ids: (B, pep_len)  — padded peptide token indices
-            mhc_ids: (B, 34)       — MHC pseudo-seq token indices
+            pep: (B, pep_len, 21)  one-hot peptide tensor
+            mhc: (B, 34, 21)       one-hot MHC pseudo-sequence tensor
         Returns:
-            logits:  (B, 2)
+            logits: (B, 2)
         """
-        # Encode both sequences to fingerprint space
-        pep_enc = self.encoder(pep_ids)   # (B, pep_len, fp_dim)
-        mhc_enc = self.encoder(mhc_ids)   # (B, 34, fp_dim)
-        # Concatenate along sequence dimension
-        x = torch.cat([pep_enc, mhc_enc], dim=1)   # (B, L, fp_dim)
-        # Transformer blocks
-        for block in self.tf_blocks:
-            x = block(x)
-        # Global average pooling over sequence → (B, fp_dim)
-        x = x.mean(dim=1)
-        return self.head(x)
+        x = torch.cat([pep, mhc], dim=1).float()   # (B, 59, 21)
+        residual = x
+        x = self.conv(x)
+        x = self.norm(residual + x)
+        residual = x
+        x = self.selfattention(x)
+        x = self.norm(residual + x)
+        x = self.flatten(x)
+        return self.feature_selection(x)
