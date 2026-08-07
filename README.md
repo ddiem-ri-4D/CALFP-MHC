@@ -1,4 +1,4 @@
-# CALFP-MHC: Interpretable Pan-Allelic Prediction of Peptide–MHC Binding and Presentation Using Chemically Grounded Fingerprints and Contrastive Learning 
+# CALFP-MHC: Molecular Fingerprint Representations and Supervised Contrastive Learning for Pan-Allelic Peptide–MHC Binding and Presentation Prediction 
 
 A deep learning framework using **repurposed amino acid molecular fingerprints** and **supervised contrastive learning** to jointly predict peptide–MHC **binding affinity (BA)** and **presentation probability (PB)** for both **HLA class I and class II** in a single unified model.
 

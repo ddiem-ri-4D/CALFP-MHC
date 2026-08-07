@@ -15,13 +15,21 @@ Concatenated fingerprint dimension per residue: 166 + 1024 + 2048 + 1024 = 4263
 
 The padding token X receives an all-zero fingerprint vector.
 
-Trigonometric positional modulation T(p) is applied element-wise:
-    T(p) = 0.5 * (1 + sin(2*pi*p / L + phi))
-where p is the residue position, L is the sequence length, and phi is a
-learned phase offset initialised to zero.  This scales each fingerprint
-dimension by a smooth sinusoidal envelope that varies with position,
-providing a lightweight positional signal without altering the fingerprint
-dimensionality.
+Positional encoding follows Vaswani et al. (2017), ADDED element-wise to
+the fingerprint vector at each position p (NOT a scalar multiplicative
+envelope — every one of the 4,263 fingerprint dimensions gets its own
+sin/cos frequency, exactly as in the original Transformer):
+    PE(p, 2i)   = sin(p / 10000^(2i/d))
+    PE(p, 2i+1) = cos(p / 10000^(2i/d))
+    x_encoded(p) = x_fingerprint(p) + PE(p)
+where p is the residue position and d = FP_DIM = 4263.
+
+After the additive encoding, each residue's fingerprint row is normalized
+by dividing by its own max value, scaling into [0,1] (matches the
+"division by the maximum value" normalization step described in Methods
+— applied per-residue here so the (L, D) matrix shape is preserved for
+the downstream interaction/attention layers, rather than collapsed into
+a single compact vector).
 
 Reference for the fingerprint repurposing idea:
     Lee & Min, AmorProt, Biochemistry 2023.
@@ -116,39 +124,42 @@ _FP_TABLE = torch.from_numpy(_build_fingerprint_table())   # (21, 4263)
 # Positional modulation
 # ---------------------------------------------------------------------------
 
-class TrigonometricPositionalModulation(nn.Module):
+def _build_sinusoidal_table(max_len: int, dim: int) -> torch.Tensor:
+    """Standard Vaswani et al. sinusoidal table, shape (max_len, dim)."""
+    position = torch.arange(max_len, dtype=torch.float32).unsqueeze(1)      # (max_len,1)
+    div_term = torch.exp(
+        torch.arange(0, dim, 2, dtype=torch.float32) * (-math.log(10000.0) / dim)
+    )
+    pe = torch.zeros(max_len, dim, dtype=torch.float32)
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term[: pe[:, 1::2].shape[1]])
+    return pe
+
+
+class SinusoidalPositionalEncoding(nn.Module):
     """
-    Applies a learned sinusoidal amplitude envelope to each sequence position.
+    Additive Vaswani-style sinusoidal positional encoding, added
+    element-wise to each residue's fingerprint vector (Methods:
+    "each fingerprint vector at position p was combined with a
+    sinusoidal positional encoding via element-wise addition").
 
-    For position p in a sequence of length L:
-        T(p) = 0.5 * (1 + sin(2*pi*p/L + phi))
-
-    phi is a scalar learned parameter (initialised to 0).  T(p) is broadcast
-    across the fingerprint dimension, scaling all bits uniformly per position.
-
-    This is a deliberate lightweight design: the fingerprint already encodes
-    chemical identity; positional modulation only needs to break symmetry
-    between identical residues at different positions.
+    Every fingerprint dimension gets its own frequency — this is NOT a
+    single scalar applied uniformly across all 4,263 dimensions.
     """
 
-    def __init__(self):
+    def __init__(self, dim: int, max_len: int = 64):
         super().__init__()
-        self.phi = nn.Parameter(torch.zeros(1))   # learnable phase offset
+        self.register_buffer('pe_table', _build_sinusoidal_table(max_len, dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: (batch, seq_len, fp_dim)
         Returns:
-            x_modulated: (batch, seq_len, fp_dim)
+            x + PE: (batch, seq_len, fp_dim)
         """
         B, L, D = x.shape
-        positions = torch.arange(L, dtype=torch.float32, device=x.device)
-        # T shape: (1, L, 1) → broadcasts over batch and fp_dim
-        T = 0.5 * (1.0 + torch.sin(
-            2.0 * math.pi * positions / max(L, 1) + self.phi
-        )).view(1, L, 1)
-        return x * T
+        return x + self.pe_table[:L].unsqueeze(0)
 
 
 # ---------------------------------------------------------------------------
@@ -164,17 +175,19 @@ class FingerprintResidueEncoder(nn.Module):
     Output: (batch, seq_len, FP_DIM)
     """
 
-    def __init__(self, project_dim: int = 0):
+    def __init__(self, project_dim: int = 0, max_len: int = 64):
         """
         Args:
             project_dim: if > 0, add a linear projection from FP_DIM to
                          project_dim after modulation (reduces memory for
                          very deep stacks).  Default 0 = no projection.
+            max_len:     longest sequence (peptide or MHC pseudo-seq) the
+                         sinusoidal table needs to cover.
         """
         super().__init__()
         # Non-trainable lookup table
         self.register_buffer('fp_table', _FP_TABLE)   # (21, 4263)
-        self.positional_mod = TrigonometricPositionalModulation()
+        self.positional_enc = SinusoidalPositionalEncoding(FP_DIM, max_len)
         self.project = (
             nn.Linear(FP_DIM, project_dim, bias=False)
             if project_dim > 0 else nn.Identity()
@@ -190,8 +203,11 @@ class FingerprintResidueEncoder(nn.Module):
         """
         # Lookup: (batch, seq_len, 4263)
         x = self.fp_table[token_ids]
-        # Positional modulation
-        x = self.positional_mod(x)
+        # Additive sinusoidal positional encoding
+        x = self.positional_enc(x)
+        # Row-wise max normalization → scales each residue's vector to [0,1]
+        row_max = x.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8)
+        x = x / row_max
         # Optional projection
         x = self.project(x)
         return x

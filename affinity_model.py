@@ -8,7 +8,11 @@ Predicts a continuous binding affinity score in [0, 1] (rescaled IC50:
 
 Pipeline
 --------
-Input tokens  (one-hot encoded peptide + MHC pseudo-sequence, 59 × 21)
+Input tokens  (amino acid index tensors: peptide + MHC pseudo-sequence)
+      ↓
+FingerprintResidueEncoder  (index → 4,263-dim fingerprint + positional
+                            encoding + normalization; same encoder class
+                            as CALFP_PS, separate learned instance)
       ↓
 ResidueInteractionBlock   (same design as CALFP_PS, smaller channel width)
       ↓
@@ -27,15 +31,15 @@ Key differences from CALFP_PS
 - mlp_hidden = 600  (vs 800 for PS)
 - Output is a single scalar (not 2-class logits).
 
-Hyperparameters (fixed to match pre-trained weights)
+Hyperparameters
 ----------------------------------------------------
-vocab_size       21
-sequence_length  59
-conv_channels  1600
-kernel_size       9
-num_heads         9
-mlp_hidden      600
-dropout         0.2
+fp_dim          4263   (fingerprint dimension — replaces vocab_size=21)
+sequence_length   59
+conv_channels   1600
+kernel_size        9
+num_heads          9
+mlp_hidden       600
+dropout          0.2
 """
 
 import math
@@ -45,6 +49,7 @@ from presentation_model import (
     ResidueInteractionBlock,
     MultiQueryAttentionBlock,
 )
+from fingerprint_encoder import FingerprintResidueEncoder, FP_DIM
 
 
 class RegressionMLP(nn.Module):
@@ -87,22 +92,24 @@ class CALFP_BA(nn.Module):
 
     def __init__(
         self,
-        vocab_size: int = 21,
+        model_dim: int = 256,        # bottleneck dim per Methods (d_b=256)
         num_hiddens: int = 600,
         num_heads: int = 9,
         num_step: int = 59,
         num_channels: int = 1600,
         depthwise_kernel_size: int = 9,
         dropout: float = 0.2,
+        max_len: int = 34,
         bias: bool = False,
     ):
         super().__init__()
-        self.vocab_size = vocab_size
-        self.norm = nn.LayerNorm(vocab_size)
+        self.model_dim = model_dim
+        self.fp_encoder = FingerprintResidueEncoder(project_dim=model_dim, max_len=max_len)
+        self.norm = nn.LayerNorm(model_dim)
         self.selfattention = MultiQueryAttentionBlock(
-            vocab_size, num_heads, dropout)
+            model_dim, num_heads, dropout)
         self.conv = ResidueInteractionBlock(
-            vocab_size=vocab_size,
+            vocab_size=model_dim,
             conv_channels=num_channels,
             kernel_size=depthwise_kernel_size,
             dropout=dropout,
@@ -110,7 +117,7 @@ class CALFP_BA(nn.Module):
         )
         self.flatten = nn.Flatten(start_dim=1, end_dim=-1)
         self.feature_selection = RegressionMLP(
-            seq_flat_dim=vocab_size * num_step,
+            seq_flat_dim=model_dim * num_step,
             hidden_dim=num_hiddens,
             dropout=dropout,
         )
@@ -119,12 +126,14 @@ class CALFP_BA(nn.Module):
                 mhc: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pep: (B, pep_len, 21)  one-hot peptide tensor
-            mhc: (B, 34, 21)       one-hot MHC pseudo-sequence tensor
+            pep: (B, pep_len)  LongTensor of amino acid indices
+            mhc: (B, 34)       LongTensor of amino acid indices
         Returns:
             affinity: (B,)  predicted rescaled IC50
         """
-        x = torch.cat([pep, mhc], dim=1).float()
+        pep_fp = self.fp_encoder(pep)
+        mhc_fp = self.fp_encoder(mhc)
+        x = torch.cat([pep_fp, mhc_fp], dim=1)
         residual = x
         x = self.conv(x)
         x = self.norm(residual + x)

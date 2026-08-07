@@ -8,13 +8,11 @@ MHC surface (eluted-ligand task, binary classification).
 
 Pipeline
 --------
-Input tokens  (one-hot encoded peptide + MHC pseudo-sequence, 59 × 21)
+Input tokens  (amino acid index tensors: peptide + MHC pseudo-sequence)
       ↓
-[Preprocessing — outside this module]
-  FingerprintResidueEncoder maps token indices → cheminformatics fingerprints
-  before the DataLoader feeds data into this network.  The network itself
-  receives standard one-hot float tensors so that pre-trained weights remain
-  compatible.
+FingerprintResidueEncoder  (index → 4,263-dim MACCS+ECFP4+ECFP6+RDKit
+                            fingerprint, + additive sinusoidal positional
+                            encoding, + row-wise max normalization)
       ↓
 ResidueInteractionBlock   (pointwise expand → GLU → depthwise conv →
                            BatchNorm → SiLU → pointwise compress → Dropout)
@@ -29,20 +27,21 @@ Flatten  →  ClassificationMLP  →  2-dim logits
       ↓
 softmax[:, 1]  =  presentation probability
 
-Hyperparameters (fixed to match pre-trained weights)
+Hyperparameters
 ----------------------------------------------------
-vocab_size          21   (20 aa + padding X)
-sequence_length     59   (25 peptide + 34 MHC pseudo-seq)
-conv_channels     3200
-kernel_size          9
-num_heads            9
-mlp_hidden         800
-dropout            0.2
+fp_dim             4263   (fingerprint dimension — replaces vocab_size=21)
+sequence_length       59   (25 peptide + 34 MHC pseudo-seq)
+conv_channels       3200
+kernel_size            9
+num_heads               9
+mlp_hidden            800
+dropout               0.2
 """
 
 import math
 import torch
 import torch.nn as nn
+from fingerprint_encoder import FingerprintResidueEncoder, FP_DIM
 
 
 # ── Building blocks ──────────────────────────────────────────────────────────
@@ -196,23 +195,28 @@ class CALFP_PS(nn.Module):
 
     def __init__(
         self,
-        vocab_size: int = 21,
+        model_dim: int = 256,        # bottleneck dim per Methods (d_b=256)
         num_hiddens: int = 800,
         num_heads: int = 9,
         num_step: int = 59,          # seq_len = 25 (pep) + 34 (MHC)
         num_channels: int = 3200,
         depthwise_kernel_size: int = 9,
         dropout: float = 0.2,
+        max_len: int = 34,           # longest of peptide(<=25)/MHC(34) branch
         bias: bool = False,
     ):
         super().__init__()
-        self.vocab_size = vocab_size
+        self.model_dim = model_dim
+        # Shared fingerprint+positional encoder for both peptide and MHC,
+        # with a linear projection FP_DIM(4263) -> model_dim(256), matching
+        # the paper's "Dimensionality reduction" step (U0 = F*W_red).
+        self.fp_encoder = FingerprintResidueEncoder(project_dim=model_dim, max_len=max_len)
         # Must use these attribute names to match saved state_dict keys
-        self.norm = nn.LayerNorm(vocab_size)
+        self.norm = nn.LayerNorm(model_dim)
         self.selfattention = MultiQueryAttentionBlock(
-            vocab_size, num_heads, dropout)
+            model_dim, num_heads, dropout)
         self.conv = ResidueInteractionBlock(
-            vocab_size=vocab_size,
+            vocab_size=model_dim,
             conv_channels=num_channels,
             kernel_size=depthwise_kernel_size,
             dropout=dropout,
@@ -220,7 +224,7 @@ class CALFP_PS(nn.Module):
         )
         self.flatten = nn.Flatten(start_dim=1, end_dim=-1)
         self.feature_selection = ClassificationMLP(
-            seq_flat_dim=vocab_size * num_step,
+            seq_flat_dim=model_dim * num_step,
             hidden_dim=num_hiddens,
             dropout=dropout,
         )
@@ -229,12 +233,14 @@ class CALFP_PS(nn.Module):
                 mhc: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pep: (B, pep_len, 21)  one-hot peptide tensor
-            mhc: (B, 34, 21)       one-hot MHC pseudo-sequence tensor
+            pep: (B, pep_len)  LongTensor of amino acid indices
+            mhc: (B, 34)       LongTensor of amino acid indices
         Returns:
             logits: (B, 2)
         """
-        x = torch.cat([pep, mhc], dim=1).float()   # (B, 59, 21)
+        pep_fp = self.fp_encoder(pep)   # (B, pep_len, 4263)
+        mhc_fp = self.fp_encoder(mhc)   # (B, 34, 4263)
+        x = torch.cat([pep_fp, mhc_fp], dim=1)   # (B, 59, 4263)
         residual = x
         x = self.conv(x)
         x = self.norm(residual + x)

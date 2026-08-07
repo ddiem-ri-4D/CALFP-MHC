@@ -80,8 +80,20 @@ def _str_to_bool(s: str) -> bool:
 def _load_model(model_cls, params_path: str,
                 device: torch.device) -> torch.nn.Module:
     net = model_cls()
-    net.load_state_dict(
-        torch.load(params_path, map_location=device, weights_only=True))
+    try:
+        net.load_state_dict(
+            torch.load(params_path, map_location=device, weights_only=True))
+    except RuntimeError as exc:
+        print(
+            f'[ERROR] "{params_path}" does not match the current model '
+            f'architecture (fingerprint input, fp_dim=4263). The .params '
+            f'files under params/ were trained on the old one-hot '
+            f'(vocab_size=21) architecture and are NOT compatible with '
+            f'this pipeline — the model must be retrained on fingerprint '
+            f'inputs before this script can be used.\nOriginal error: {exc}',
+            file=sys.stderr,
+        )
+        sys.exit(1)
     net.to(device)
     net.eval()
     return net

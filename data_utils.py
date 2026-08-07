@@ -6,22 +6,15 @@ Data loading, validation, and inference utilities for CALFP-MHC.
 Encoding strategy
 -----------------
 CALFP-MHC uses cheminformatics molecular fingerprints (MACCS, ECFP4,
-ECFP6, RDKit) to represent the chemical identity of each amino acid.
-These fingerprints are computed during preprocessing and stored in
-`fingerprint_table.npy` for fast repeated access.
+ECFP6, RDKit; 4,263-dim per residue, see fingerprint_encoder.py) as the
+network's actual input, per the manuscript's Methods.
 
-However, the core neural network weights were trained with standard
-one-hot encoding (vocab_size = 21).  To preserve full compatibility
-with pre-trained parameters, this module:
-
-  1. Validates the input peptide/allele data.
-  2. Converts sequences to one-hot tensors as the network input.
-  3. Attaches the cheminformatics fingerprint vectors as an auxiliary
-     column in the output DataFrame (for downstream analysis / future
-     fingerprint-native model variants).
-
-This design means no retraining is required while still grounding the
-tool in cheminformatics representations at the output level.
+This module converts each peptide/MHC string to a LongTensor of amino
+acid indices (0..20).  The lookup from index → 4,263-dim fingerprint
+(plus additive sinusoidal positional encoding and normalization) happens
+inside the model itself (FingerprintResidueEncoder, shared between the
+peptide and MHC branches), not here — this keeps the fingerprint table
+and positional-encoding parameters bundled with the model checkpoint.
 
 Input file format
 -----------------
@@ -52,13 +45,11 @@ PEP_MAX_LEN    = 25    # peptides padded to this length
 MHC_PSEUDO_LEN = 34    # fixed MHC pseudo-sequence length
 
 # Vocabulary: 20 standard amino acids + padding X
-_VOCAB = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L',
-          'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y', 'X']
-AA_TO_IDX  = {aa: i for i, aa in enumerate(_VOCAB)}
-VOCAB_SIZE = len(_VOCAB)   # 21
+# Must match the token order in fingerprint_encoder._TOKENS exactly, since
+# these indices are used to look up rows in the fingerprint table.
+from fingerprint_encoder import AA_TO_IDX, FP_DIM
 
-# One-hot lookup table: shape (21, 21)
-_ONEHOT = torch.eye(VOCAB_SIZE, dtype=torch.float32)
+VOCAB_SIZE = len(AA_TO_IDX)   # 21 (20 aa + padding X)
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -83,31 +74,34 @@ class RunLogger:
 
 def encode_sequence(seq: str, fixed_len: int) -> torch.Tensor:
     """
-    Pad *seq* with 'X' to *fixed_len* and convert to a one-hot float tensor.
+    Pad *seq* with 'X' to *fixed_len* and convert to amino acid index tensor.
+    The model's FingerprintResidueEncoder looks these indices up against the
+    4,263-dim fingerprint table (see fingerprint_encoder.py).
 
     Args:
         seq:       raw amino acid string
         fixed_len: target length (right-pad with X; truncate if longer)
     Returns:
-        tensor: (fixed_len, 21)  float32
+        tensor: (fixed_len,)  LongTensor of indices in [0, 20]
     """
     padded = (seq + PADDING_TOKEN * fixed_len)[:fixed_len]
-    indices = torch.tensor(
+    return torch.tensor(
         [AA_TO_IDX.get(aa, AA_TO_IDX['X']) for aa in padded],
         dtype=torch.long,
     )
-    return _ONEHOT[indices]   # (fixed_len, 21)
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
 class PepMHCDataset(Dataset):
     """
-    PyTorch Dataset for peptide–MHC pairs encoded as one-hot float tensors.
+    PyTorch Dataset for peptide–MHC pairs, encoded as amino acid index
+    tensors (LongTensor). The model converts indices → 4,263-dim
+    fingerprint vectors internally via FingerprintResidueEncoder.
 
-    Stores the full (N, L, 21) tensors in memory.  For datasets of
-    up to several million pairs this is feasible; for very large datasets
-    consider memory-mapped storage.
+    Storing indices (not the expanded fingerprints) keeps memory usage
+    the same as the old one-hot version — expansion to 4,263 dims happens
+    lazily per-batch inside the model's forward pass.
     """
 
     def __init__(self, peptides: list[str], mhc_seqs: list[str]):
