@@ -22,7 +22,7 @@ conda activate CALFP
 ### Command
 
 ```bash
-python CALFP_MHC.py --input test.parquet --output test_out.parquet --gpu False --BA True
+python CALFP_MHC.py --input input/test.parquet --output prediction/test_predictions.parquet --gpu False --BA True
 ```
 
 ## Input Format
