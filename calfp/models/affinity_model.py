@@ -1,62 +1,41 @@
 """
 affinity_model.py
------------------
-CALFP-MHC  —  Binding Affinity Network (CALFP_BA)
+------------------
+CALFP-MHC  --  Binding Affinity Network (CALFP_BA)
 
-Predicts a continuous binding affinity score in [0, 1] (rescaled IC50:
-1 − log(IC50) / log(50 000)) for peptide–MHC class I and class II pairs.
+Predicts a continuous binding-affinity score (rescaled IC50 / %Rank).
 
-Pipeline
---------
-Input tokens  (amino acid index tensors: peptide + MHC pseudo-sequence)
-      ↓
-FingerprintResidueEncoder  (index → 4,263-dim fingerprint + positional
-                            encoding + normalization; same encoder class
-                            as CALFP_PS, separate learned instance)
-      ↓
-ResidueInteractionBlock   (same design as CALFP_PS, smaller channel width)
-      ↓
-LayerNorm  +  residual
-      ↓
-MultiQueryAttentionBlock  (9 heads)
-      ↓
-LayerNorm  +  residual
-      ↓
-Flatten  →  RegressionMLP  →  scalar output
+Architecture (Fig.1e "Shared Encoder (pre-trained) -> split heads"):
+    CALFPEncoder (SAME architecture and hyperparameters as CALFP_PS --
+                  see encoder.py; the manuscript's "Training
+                  hyperparameters" section states one set of numbers
+                  and does not distinguish EL vs BA encoders)
+      -> AffinityHead (BA head: MSE + Pearson loss -> IC50 & %Rank)
 
-Key differences from CALFP_PS
-------------------------------
-- conv_channels = 1600  (vs 3200 for PS) — BA datasets are typically
-  smaller than EL datasets; the lighter conv block reduces overfitting.
-- mlp_hidden = 600  (vs 800 for PS)
-- Output is a single scalar (not 2-class logits).
-
-Hyperparameters
+Hyperparameters (identical to CALFP_PS)
 ----------------------------------------------------
-fp_dim          4263   (fingerprint dimension)
-sequence_length   59
-conv_channels   1600
-kernel_size        9
-num_heads          9
-mlp_hidden       600
-dropout          0.2
+model_dim (d_b)       256
+conv_channels        3200
+kernel_size              9
+num_heads                 9
+mlp_hidden             800
+dropout                0.2
 """
 
-import math
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), '..', '..')))
+
 import torch
 import torch.nn as nn
-from calfp.models.presentation_model import (
-    ResidueInteractionBlock,
-    MultiQueryAttentionBlock,
-)
-from calfp.encoding.fingerprint_encoder import FingerprintResidueEncoder, FP_DIM
+from calfp.models.encoder import CALFPEncoder
 
 
-class RegressionMLP(nn.Module):
+class AffinityHead(nn.Module):
     """
-    Single-value regression head for binding affinity prediction.
+    BA head (Fig.1e "BA Head: MSE + Pearson loss -> IC50 & %Rank").
+    Structure: Linear -> SiLU -> BN -> Dropout -> Linear -> ReLU -> Linear(1)
 
-    Structure: Linear → SiLU → BN → Dropout → Linear → ReLU → Linear(1)
     Output is a raw scalar; apply sigmoid at inference if a [0,1] value
     is needed for downstream scoring.
     """
@@ -77,81 +56,55 @@ class RegressionMLP(nn.Module):
         return self.sequential(x).squeeze(-1)   # (B,)
 
 
+# Backward-compatible alias
+RegressionMLP = AffinityHead
+
+
 class CALFP_BA(nn.Module):
     """
-    CALFP-MHC Binding Affinity model.
+    CALFP-MHC Binding Affinity model = shared CALFPEncoder + AffinityHead.
 
-    Accepts one-hot encoded peptide and MHC tensors and produces a
-    continuous affinity score per peptide–MHC pair.  Training uses MSE
-    loss on rescaled IC50 values.
-
-    This class preserves the internal attribute names (norm, selfattention,
-    conv, flatten, feature_selection) required to load pre-trained weight
-    files without modification.
+    Uses the SAME CALFPEncoder hyperparameters as CALFP_PS (model_dim=256,
+    conv_channels=3200, num_heads=9, mlp_hidden=800) -- previously this
+    model used a lighter 1600/600 configuration with no basis in the
+    manuscript; that discrepancy has been removed.
     """
 
     def __init__(
         self,
-        model_dim: int = 256,        # bottleneck dim per Methods (d_b=256)
-        num_hiddens: int = 600,
+        model_dim: int = 256,
+        num_hiddens: int = 800,
         num_heads: int = 9,
-        num_step: int = 59,
-        num_channels: int = 1600,
+        num_channels: int = 3200,
         depthwise_kernel_size: int = 9,
         dropout: float = 0.2,
-        max_len: int = 34,
-        bias: bool = False,
+        pep_max_len: int = 25,
+        mhc_len: int = 34,
     ):
         super().__init__()
         self.model_dim = model_dim
-        self.fp_encoder = FingerprintResidueEncoder(project_dim=model_dim, max_len=max_len)
-        self.norm = nn.LayerNorm(model_dim)
-        self.selfattention = MultiQueryAttentionBlock(
-            model_dim, num_heads, dropout)
-        self.conv = ResidueInteractionBlock(
-            vocab_size=model_dim,
-            conv_channels=num_channels,
-            kernel_size=depthwise_kernel_size,
-            dropout=dropout,
-            use_group_norm=False,
+        self.encoder = CALFPEncoder(
+            model_dim=model_dim, num_heads=num_heads, num_channels=num_channels,
+            depthwise_kernel_size=depthwise_kernel_size, dropout=dropout,
+            pep_max_len=pep_max_len, mhc_len=mhc_len,
         )
-        self.flatten = nn.Flatten(start_dim=1, end_dim=-1)
-        self.feature_selection = RegressionMLP(
-            seq_flat_dim=model_dim * num_step,
-            hidden_dim=num_hiddens,
-            dropout=dropout,
+        self.head = AffinityHead(
+            seq_flat_dim=model_dim * pep_max_len,
+            hidden_dim=num_hiddens, dropout=dropout,
         )
 
     def encode(self, pep: torch.Tensor, mhc: torch.Tensor) -> torch.Tensor:
-        """Pooled encoder output — see CALFP_PS.encode() docstring."""
-        pep_fp = self.fp_encoder(pep)
-        mhc_fp = self.fp_encoder(mhc)
-        x = torch.cat([pep_fp, mhc_fp], dim=1)
-        residual = x
-        x = self.conv(x)
-        x = self.norm(residual + x)
-        residual = x
-        x = self.selfattention(x)
-        x = self.norm(residual + x)
-        return x.mean(dim=1)
+        """Pooled encoder output g (B, model_dim) -- for Stage-1 SupCon pretraining."""
+        pooled, _ = self.encoder(pep, mhc)
+        return pooled
 
-    def forward(self, pep: torch.Tensor,
-                mhc: torch.Tensor) -> torch.Tensor:
+    def forward(self, pep: torch.Tensor, mhc: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pep: (B, pep_len)  LongTensor of amino acid indices
-            mhc: (B, 34)       LongTensor of amino acid indices
+            pep: (B, pep_max_len)  LongTensor of amino acid indices
+            mhc: (B, mhc_len)      LongTensor of amino acid indices
         Returns:
             affinity: (B,)  predicted rescaled IC50
         """
-        pep_fp = self.fp_encoder(pep)
-        mhc_fp = self.fp_encoder(mhc)
-        x = torch.cat([pep_fp, mhc_fp], dim=1)
-        residual = x
-        x = self.conv(x)
-        x = self.norm(residual + x)
-        residual = x
-        x = self.selfattention(x)
-        x = self.norm(residual + x)
-        x = self.flatten(x)
-        return self.feature_selection(x)
+        _, flattened = self.encoder(pep, mhc)
+        return self.head(flattened)

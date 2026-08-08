@@ -20,7 +20,7 @@ GPU inference:
 Input format
 ------------
 CSV file with columns:
-    peptide  — amino acid sequence, length 8–25, standard residues only
+    peptide  — amino acid sequence, length 7–25, standard residues only
     allele   — HLA allele name (must be present in HLA_library.csv)
 
 TSV and Parquet files are also accepted (auto-detected by extension).

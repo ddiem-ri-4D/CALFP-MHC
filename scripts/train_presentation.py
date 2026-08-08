@@ -131,11 +131,11 @@ def stage2_finetune(net, train_loader, val_loader, args, device):
     # ("Frozen encoder + 2 independent linear heads").
     for p in net.parameters():
         p.requires_grad = False
-    for p in net.feature_selection.parameters():
+    for p in net.head.parameters():
         p.requires_grad = True
 
     optim = torch.optim.Adam(
-        net.feature_selection.parameters(),
+        net.head.parameters(),
         lr=args.lr_finetune, weight_decay=args.weight_decay,
     )
     criterion = nn.CrossEntropyLoss()
@@ -148,9 +148,7 @@ def stage2_finetune(net, train_loader, val_loader, args, device):
         t0 = time.time()
         net.train()
         # Keep frozen submodules in eval mode (BatchNorm/Dropout stability)
-        net.fp_encoder.eval()
-        net.conv.eval()
-        net.selfattention.eval()
+        net.encoder.eval()
 
         total_loss, n_batches = 0.0, 0
         for pep, mhc, label in train_loader:
