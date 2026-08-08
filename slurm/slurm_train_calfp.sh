@@ -34,7 +34,7 @@ micromamba activate calfp   # adjust to your actual env name
 # --- paths --------------------------------------------------------------
 PROJECT_DIR="$(pwd)"
 DATA_ROOT="${PROJECT_DIR}/data"          # expects el_train_fold{N}.csv etc.
-HLA_LIB="${PROJECT_DIR}/HLA_library.csv"
+HLA_LIB="${PROJECT_DIR}/resources/HLA_library.csv"
 OUTPUT_DIR="${PROJECT_DIR}/params_new"
 mkdir -p "${OUTPUT_DIR}" logs
 
@@ -42,7 +42,7 @@ FOLD=$(( SLURM_ARRAY_TASK_ID % 5 ))
 
 if [ "${SLURM_ARRAY_TASK_ID}" -lt 5 ]; then
     echo "=== Training EL (presentation) fold ${FOLD} ==="
-    python train_presentation.py \
+    python scripts/train_presentation.py \
         --train_csv "${DATA_ROOT}/el_train_fold${FOLD}.csv" \
         --val_csv   "${DATA_ROOT}/el_val_fold${FOLD}.csv" \
         --hla_lib   "${HLA_LIB}" \
@@ -59,7 +59,7 @@ if [ "${SLURM_ARRAY_TASK_ID}" -lt 5 ]; then
         --device cuda
 else
     echo "=== Training BA (affinity) fold ${FOLD} ==="
-    python train_affinity.py \
+    python scripts/train_affinity.py \
         --train_csv "${DATA_ROOT}/ba_train_fold${FOLD}.csv" \
         --val_csv   "${DATA_ROOT}/ba_val_fold${FOLD}.csv" \
         --hla_lib   "${HLA_LIB}" \

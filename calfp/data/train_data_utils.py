@@ -17,7 +17,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from data_utils import encode_sequence, PEP_MAX_LEN, MHC_PSEUDO_LEN
+from calfp.data.data_utils import encode_sequence, PEP_MAX_LEN, MHC_PSEUDO_LEN
 
 
 class LabeledPepMHCDataset(Dataset):

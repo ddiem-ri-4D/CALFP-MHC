@@ -1,48 +1,87 @@
 """
-train_presentation.py
-----------------------
-Two-stage training for CALFP_PS, matching the manuscript's Methods:
+train_affinity.py
+------------------
+Two-stage training for CALFP_BA, matching the manuscript's Methods:
 
 Stage 1 — Supervised contrastive pre-training (full network trainable):
-    pooled encoder output -> ContrastiveProjectionHead -> SupConLoss (tau=0.07)
-Stage 2 — Fine-tuning (encoder frozen, per Fig.1d "Frozen encoder"):
-    only feature_selection (classification head) is trained, BCE loss.
+    Same as train_presentation.py — SupCon needs a binary label, so this
+    script expects a 'label' column (0/1 binder) for Stage 1 even though
+    Stage 2 trains on a continuous target ('affinity' column: rescaled
+    IC50 or %Rank, however you prepared it upstream).
+Stage 2 — Fine-tuning (encoder frozen):
+    only feature_selection (regression head) is trained,
+    loss = MSE + Pearson correlation loss (Methods: "BA Head: MSE +
+    Pearson loss → IC50 & %Rank").
 
 Usage:
-    python train_presentation.py \\
-        --train_csv data/el_train_fold0.csv \\
-        --val_csv   data/el_val_fold0.csv \\
+    python train_affinity.py \\
+        --train_csv data/ba_train_fold0.csv \\
+        --val_csv   data/ba_val_fold0.csv \\
         --hla_lib   HLA_library.csv \\
         --fold 0 \\
         --output_dir params_new/ \\
         --epochs_pretrain 30 --epochs_finetune 100 \\
         --batch_size 256 --lr_pretrain 1e-4 --lr_finetune 1e-4 \\
-        --patience 10 --device cuda
+        --pearson_weight 1.0 --patience 10 --device cuda
 
-Input CSV columns required: peptide, allele, label (0/1 binder).
-Output: params_new/el_fold{fold}.params  (state_dict, loadable by predict.py)
+Input CSV columns required: peptide, allele, label (0/1, for Stage-1
+SupCon only), affinity (continuous target for Stage-2 regression).
+Output: params_new/ba_fold{fold}.params
 """
+
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), '..')))
+
 
 import argparse
 import copy
 import os
-import sys
 import time
 
+import pandas as pd
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
-from presentation_model import CALFP_PS, ContrastiveProjectionHead
-from supcon_loss import SupConLoss
-from train_data_utils import LabeledPepMHCDataset, load_hla_library, read_labeled_file
+from calfp.models.affinity_model import CALFP_BA
+from calfp.models.presentation_model import ContrastiveProjectionHead
+from calfp.losses.supcon_loss import SupConLoss
+from calfp.data.train_data_utils import (
+    load_hla_library, read_labeled_file, pearson_loss,
+)
+from calfp.data.data_utils import encode_sequence, PEP_MAX_LEN, MHC_PSEUDO_LEN
+
+
+class AffinityDataset(Dataset):
+    """Peptide/MHC + binary label (Stage 1) + continuous affinity (Stage 2)."""
+
+    def __init__(self, df: pd.DataFrame, hla_lib: dict):
+        missing = {'peptide', 'allele', 'label', 'affinity'} - set(df.columns)
+        if missing:
+            raise ValueError(f'Training file missing columns: {missing}')
+        unknown = set(df['allele']) - set(hla_lib)
+        if unknown:
+            raise ValueError(f'Unrecognised allele(s): {unknown}')
+
+        self.pep = torch.stack(
+            [encode_sequence(p, PEP_MAX_LEN) for p in df['peptide']])
+        self.mhc = torch.stack(
+            [encode_sequence(hla_lib[a], MHC_PSEUDO_LEN) for a in df['allele']])
+        self.label = torch.tensor(df['label'].values, dtype=torch.float32)
+        self.affinity = torch.tensor(df['affinity'].values, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.pep)
+
+    def __getitem__(self, idx):
+        return self.pep[idx], self.mhc[idx], self.label[idx], self.affinity[idx]
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description='Train CALFP_PS (presentation score model)')
+    p = argparse.ArgumentParser(description='Train CALFP_BA (binding affinity model)')
     p.add_argument('--train_csv', required=True)
     p.add_argument('--val_csv', required=True)
-    p.add_argument('--hla_lib', default='HLA_library.csv')
+    p.add_argument('--hla_lib', default='resources/HLA_library.csv')
     p.add_argument('--fold', type=int, default=0)
     p.add_argument('--output_dir', default='params_new')
     p.add_argument('--epochs_pretrain', type=int, default=30)
@@ -52,8 +91,9 @@ def build_parser():
     p.add_argument('--lr_finetune', type=float, default=1e-4)
     p.add_argument('--weight_decay', type=float, default=1e-4)
     p.add_argument('--temperature', type=float, default=0.07)
-    p.add_argument('--patience', type=int, default=10,
-                    help='Early-stopping patience on val loss (Stage 2 only).')
+    p.add_argument('--pearson_weight', type=float, default=1.0,
+                    help='Weight on (1 - Pearson r) term added to MSE.')
+    p.add_argument('--patience', type=int, default=10)
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     p.add_argument('--num_workers', type=int, default=4)
     p.add_argument('--seed', type=int, default=0)
@@ -64,8 +104,8 @@ def make_loaders(args):
     hla_lib = load_hla_library(args.hla_lib)
     train_df = read_labeled_file(args.train_csv)
     val_df = read_labeled_file(args.val_csv)
-    train_ds = LabeledPepMHCDataset(train_df, hla_lib)
-    val_ds = LabeledPepMHCDataset(val_df, hla_lib)
+    train_ds = AffinityDataset(train_df, hla_lib)
+    val_ds = AffinityDataset(val_df, hla_lib)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                                num_workers=args.num_workers, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
@@ -85,9 +125,8 @@ def stage1_pretrain(net, proj_head, train_loader, args, device):
     for epoch in range(args.epochs_pretrain):
         t0 = time.time()
         total_loss, n_batches = 0.0, 0
-        for pep, mhc, label in train_loader:
+        for pep, mhc, label, _affinity in train_loader:
             pep, mhc, label = pep.to(device), mhc.to(device), label.to(device)
-            # Skip batches with fewer than 2 classes present (SupCon needs positives)
             if label.unique().numel() < 2:
                 continue
             optim.zero_grad()
@@ -105,25 +144,25 @@ def stage1_pretrain(net, proj_head, train_loader, args, device):
 
 
 @torch.no_grad()
-def evaluate_bce(net, loader, device, criterion):
+def evaluate_mse_pearson(net, loader, device, pearson_weight):
     net.eval()
     total, n = 0.0, 0
-    for pep, mhc, label in loader:
-        pep, mhc, label = pep.to(device), mhc.to(device), label.to(device).long()
-        logits = net(pep, mhc)
-        loss = criterion(logits, label)
+    for pep, mhc, _label, affinity in loader:
+        pep, mhc, affinity = pep.to(device), mhc.to(device), affinity.to(device)
+        pred = net(pep, mhc)
+        mse = torch.nn.functional.mse_loss(pred, affinity)
+        pr = pearson_loss(pred, affinity)
+        loss = mse + pearson_weight * pr
         total += loss.item()
         n += 1
     return total / max(n, 1)
 
 
 def stage2_finetune(net, train_loader, val_loader, args, device):
-    print(f'\n[Stage 2] Fine-tuning classification head (encoder frozen) — '
+    print(f'\n[Stage 2] Fine-tuning regression head (encoder frozen) — '
           f'up to {args.epochs_finetune} epochs, patience={args.patience}, '
-          f'lr={args.lr_finetune}')
+          f'lr={args.lr_finetune}, loss=MSE + {args.pearson_weight}*(1-Pearson r)')
 
-    # Freeze everything except the final classification head, per Fig.1d
-    # ("Frozen encoder + 2 independent linear heads").
     for p in net.parameters():
         p.requires_grad = False
     for p in net.feature_selection.parameters():
@@ -133,7 +172,6 @@ def stage2_finetune(net, train_loader, val_loader, args, device):
         net.feature_selection.parameters(),
         lr=args.lr_finetune, weight_decay=args.weight_decay,
     )
-    criterion = nn.CrossEntropyLoss()
 
     best_val = float('inf')
     best_state = copy.deepcopy(net.state_dict())
@@ -142,26 +180,27 @@ def stage2_finetune(net, train_loader, val_loader, args, device):
     for epoch in range(args.epochs_finetune):
         t0 = time.time()
         net.train()
-        # Keep frozen submodules in eval mode (BatchNorm/Dropout stability)
         net.fp_encoder.eval()
         net.conv.eval()
         net.selfattention.eval()
 
         total_loss, n_batches = 0.0, 0
-        for pep, mhc, label in train_loader:
-            pep, mhc, label = pep.to(device), mhc.to(device), label.to(device).long()
+        for pep, mhc, _label, affinity in train_loader:
+            pep, mhc, affinity = pep.to(device), mhc.to(device), affinity.to(device)
             optim.zero_grad()
-            logits = net(pep, mhc)
-            loss = criterion(logits, label)
+            pred = net(pep, mhc)
+            mse = torch.nn.functional.mse_loss(pred, affinity)
+            pr = pearson_loss(pred, affinity)
+            loss = mse + args.pearson_weight * pr
             loss.backward()
             optim.step()
             total_loss += loss.item()
             n_batches += 1
         train_loss = total_loss / max(n_batches, 1)
 
-        val_loss = evaluate_bce(net, val_loader, device, criterion)
+        val_loss = evaluate_mse_pearson(net, val_loader, device, args.pearson_weight)
         print(f'  epoch {epoch+1:3d}/{args.epochs_finetune}  '
-              f'train_bce={train_loss:.4f}  val_bce={val_loss:.4f}  '
+              f'train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  '
               f'({time.time()-t0:.1f}s)')
 
         if val_loss < best_val - 1e-5:
@@ -187,15 +226,15 @@ def main():
 
     train_loader, val_loader = make_loaders(args)
 
-    net = CALFP_PS().to(device)
+    net = CALFP_BA().to(device)
     proj_head = ContrastiveProjectionHead(in_dim=net.model_dim).to(device)
 
     net = stage1_pretrain(net, proj_head, train_loader, args, device)
     net, best_val = stage2_finetune(net, train_loader, val_loader, args, device)
 
-    out_path = os.path.join(args.output_dir, f'el_fold{args.fold}.params')
+    out_path = os.path.join(args.output_dir, f'ba_fold{args.fold}.params')
     torch.save(net.state_dict(), out_path)
-    print(f'\nSaved: {out_path}  (best val BCE = {best_val:.4f})')
+    print(f'\nSaved: {out_path}  (best val loss = {best_val:.4f})')
 
 
 if __name__ == '__main__':

@@ -47,7 +47,7 @@ MHC_PSEUDO_LEN = 34    # fixed MHC pseudo-sequence length
 # Vocabulary: 20 standard amino acids + padding X
 # Must match the token order in fingerprint_encoder._TOKENS exactly, since
 # these indices are used to look up rows in the fingerprint table.
-from fingerprint_encoder import AA_TO_IDX, FP_DIM
+from calfp.encoding.fingerprint_encoder import AA_TO_IDX, FP_DIM
 
 VOCAB_SIZE = len(AA_TO_IDX)   # 21 (20 aa + padding X)
 

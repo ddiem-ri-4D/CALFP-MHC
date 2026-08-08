@@ -41,7 +41,7 @@ dropout               0.2
 import math
 import torch
 import torch.nn as nn
-from fingerprint_encoder import FingerprintResidueEncoder, FP_DIM
+from calfp.encoding.fingerprint_encoder import FingerprintResidueEncoder, FP_DIM
 
 
 # ── Building blocks ──────────────────────────────────────────────────────────

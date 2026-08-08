@@ -33,6 +33,11 @@ CSV with original columns plus:
                           [only when --BA True]
 """
 
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), '..')))
+
+
 import argparse
 import os
 import sys
@@ -40,9 +45,9 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from presentation_model import CALFP_PS
-from affinity_model import CALFP_BA
-from data_utils import load_input, run_presentation_inference, run_affinity_inference
+from calfp.models.presentation_model import CALFP_PS
+from calfp.models.affinity_model import CALFP_BA
+from calfp.data.data_utils import load_input, run_presentation_inference, run_affinity_inference
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -106,9 +111,9 @@ def main():
     device = torch.device('cuda' if _str_to_bool(args.gpu) else 'cpu')
     run_ba = _str_to_bool(args.BA)
 
-    script_dir   = os.path.dirname(os.path.abspath(__file__))
-    hla_lib_path = os.path.join(script_dir, 'HLA_library.csv')
-    params_dir   = os.path.join(script_dir, 'params')
+    repo_root    = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    hla_lib_path = os.path.join(repo_root, 'resources', 'HLA_library.csv')
+    params_dir   = os.path.join(repo_root, 'params')
     log_path     = os.path.join(os.getcwd(), 'error.log')
 
     if not os.path.isfile(args.input):

@@ -17,12 +17,49 @@ conda activate CALFP
 
 ## Usage
 
-`CALFP_MHC.py` is used for making predictions of binding affinity (BA) and presentation score (PB) for HLA class I and class II.
+`scripts/predict.py` is used for making predictions of binding affinity (BA) and presentation score (PB) for HLA class I and class II.
 
 ### Command
 
+Run from the repository root:
+
 ```bash
-python CALFP_MHC.py --input input/test.parquet --output prediction/test_predictions.parquet --gpu False --BA True
+python scripts/predict.py --input input/test.parquet --output prediction/test_predictions.parquet --gpu False --BA True
+```
+
+Training (2-stage: SupCon pretrain → fine-tune), also run from the repository root:
+
+```bash
+python scripts/train_presentation.py --train_csv data/el_train_fold0.csv --val_csv data/el_val_fold0.csv --fold 0
+python scripts/train_affinity.py     --train_csv data/ba_train_fold0.csv --val_csv data/ba_val_fold0.csv --fold 0
+```
+
+On the Artemis SLURM cluster, submit the array job (5 EL folds + 5 BA folds) from the repository root:
+
+```bash
+mkdir -p logs
+sbatch slurm/slurm_train_calfp.sh
+```
+
+## Project structure
+
+```
+CALFP-MHC/
+├── calfp/                     # importable package — no need to run these directly
+│   ├── models/                # CALFP_PS, CALFP_BA, ContrastiveProjectionHead
+│   ├── encoding/               # FingerprintResidueEncoder (MACCS+ECFP4+ECFP6+RDKit, positional encoding)
+│   ├── data/                   # dataset / CSV loading utilities
+│   └── losses/                 # SupConLoss
+├── scripts/                    # entry points — run these
+│   ├── predict.py
+│   ├── train_presentation.py
+│   └── train_affinity.py
+├── slurm/                      # SLURM batch scripts for Artemis
+├── resources/
+│   └── HLA_library.csv         # allele -> pseudo-sequence lookup
+├── params/                     # trained model checkpoints (el_fold*.params, ba_fold*.params)
+├── data/, input/, prediction/, figs/
+├── calfp.yaml, README.md, LICENSE
 ```
 
 ## Input Format

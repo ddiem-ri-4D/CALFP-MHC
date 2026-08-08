@@ -45,11 +45,11 @@ dropout          0.2
 import math
 import torch
 import torch.nn as nn
-from presentation_model import (
+from calfp.models.presentation_model import (
     ResidueInteractionBlock,
     MultiQueryAttentionBlock,
 )
-from fingerprint_encoder import FingerprintResidueEncoder, FP_DIM
+from calfp.encoding.fingerprint_encoder import FingerprintResidueEncoder, FP_DIM
 
 
 class RegressionMLP(nn.Module):
