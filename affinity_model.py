@@ -122,6 +122,19 @@ class CALFP_BA(nn.Module):
             dropout=dropout,
         )
 
+    def encode(self, pep: torch.Tensor, mhc: torch.Tensor) -> torch.Tensor:
+        """Pooled encoder output — see CALFP_PS.encode() docstring."""
+        pep_fp = self.fp_encoder(pep)
+        mhc_fp = self.fp_encoder(mhc)
+        x = torch.cat([pep_fp, mhc_fp], dim=1)
+        residual = x
+        x = self.conv(x)
+        x = self.norm(residual + x)
+        residual = x
+        x = self.selfattention(x)
+        x = self.norm(residual + x)
+        return x.mean(dim=1)
+
     def forward(self, pep: torch.Tensor,
                 mhc: torch.Tensor) -> torch.Tensor:
         """

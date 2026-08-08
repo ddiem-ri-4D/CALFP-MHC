@@ -229,6 +229,29 @@ class CALFP_PS(nn.Module):
             dropout=dropout,
         )
 
+    def encode(self, pep: torch.Tensor, mhc: torch.Tensor) -> torch.Tensor:
+        """
+        Backbone up through the encoder, average-pooled across sequence
+        positions (Methods: "average pooling across sequence positions
+        produces a global representation g"). Used for Stage-1 SupCon
+        pretraining via ContrastiveProjectionHead; NOT used by forward()
+        (forward() flattens instead, matching the existing fine-tuning
+        head design already in this file).
+
+        Returns:
+            g: (B, model_dim)
+        """
+        pep_fp = self.fp_encoder(pep)
+        mhc_fp = self.fp_encoder(mhc)
+        x = torch.cat([pep_fp, mhc_fp], dim=1)
+        residual = x
+        x = self.conv(x)
+        x = self.norm(residual + x)
+        residual = x
+        x = self.selfattention(x)
+        x = self.norm(residual + x)
+        return x.mean(dim=1)   # (B, model_dim)
+
     def forward(self, pep: torch.Tensor,
                 mhc: torch.Tensor) -> torch.Tensor:
         """
@@ -249,3 +272,29 @@ class CALFP_PS(nn.Module):
         x = self.norm(residual + x)
         x = self.flatten(x)
         return self.feature_selection(x)
+
+
+class ContrastiveProjectionHead(nn.Module):
+    """
+    Stage-1 SupCon projection head (Methods: "two-layer projection head
+    ... 2-layer MLP → L2 norm unit-norm embeddings on hypersphere",
+    "two fully connected layers (800 → 64) with SiLU activation").
+
+    Takes the pooled encoder output (model_dim, default 256) and projects
+    to a 64-dim unit-norm embedding for the SupCon loss. Discarded after
+    Stage 1 — Stage 2 fine-tunes the existing classification/regression
+    head on top of the (frozen or unfrozen, per your training script)
+    encoder instead.
+    """
+
+    def __init__(self, in_dim: int = 256, hidden_dim: int = 800, out_dim: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, g: torch.Tensor) -> torch.Tensor:
+        z = self.net(g)
+        return nn.functional.normalize(z, p=2, dim=-1)   # unit hypersphere
