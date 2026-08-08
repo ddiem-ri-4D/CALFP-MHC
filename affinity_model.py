@@ -33,7 +33,7 @@ Key differences from CALFP_PS
 
 Hyperparameters
 ----------------------------------------------------
-fp_dim          4263   (fingerprint dimension — replaces vocab_size=21)
+fp_dim          4263   (fingerprint dimension)
 sequence_length   59
 conv_channels   1600
 kernel_size        9

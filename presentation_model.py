@@ -29,7 +29,7 @@ softmax[:, 1]  =  presentation probability
 
 Hyperparameters
 ----------------------------------------------------
-fp_dim             4263   (fingerprint dimension — replaces vocab_size=21)
+fp_dim             4263   (fingerprint dimension)
 sequence_length       59   (25 peptide + 34 MHC pseudo-seq)
 conv_channels       3200
 kernel_size            9
